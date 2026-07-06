@@ -7,9 +7,11 @@ import WhisperKit
 public final class WhisperTranscriber: Transcribing {
     /// Identificador de modelo resuelto contra el repo HF `argmaxinc/whisperkit-coreml`
     /// (WhisperKit 0.18 hace glob-match del `model:` contra las carpetas del repo).
-    /// "large-v3_turbo" resuelve a la carpeta `openai_whisper-large-v3_turbo`
-    /// (variante turbo de large-v3, sin cuantizar — disponible para chips M2/M3/M4).
-    public static let preferredModel = "large-v3_turbo"
+    /// Variante CUANTIZADA (954MB) de large-v3 turbo: la full-precision (3GB)
+    /// dispara compilaciones ANE de 10-30 min en la primera inferencia — inviable
+    /// para dictado (confirmado 2026-07-06: ANECompilerService al 95% CPU con
+    /// kiki bloqueado en "Procesando…").
+    public static let preferredModel = "large-v3_turbo_954MB"
 
     private var whisperKit: WhisperKit?
     public private(set) var isReady = false
@@ -20,7 +22,9 @@ public final class WhisperTranscriber: Transcribing {
     public func prepare() async throws {
         let started = Date()
         do {
-            whisperKit = try await WhisperKit(WhisperKitConfig(model: Self.preferredModel))
+            // prewarm: fuerza la especialización ANE/CoreML durante la carga
+            // ("Cargando modelo…"), nunca durante el primer dictado del usuario.
+            whisperKit = try await WhisperKit(WhisperKitConfig(model: Self.preferredModel, prewarm: true))
             KikiLog.log("kiki stt: modelo cargado (\(Self.preferredModel)) en \(String(format: "%.1f", Date().timeIntervalSince(started)))s")
         } catch {
             KikiLog.log("kiki stt: \(Self.preferredModel) no disponible (\(error)); usando modelo recomendado")

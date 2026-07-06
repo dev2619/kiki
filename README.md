@@ -9,7 +9,7 @@ Dictado por voz con IA, **100% local**, para macOS. Mantén **Fn**, habla, suelt
 
 - macOS 14+ · Apple Silicon
 - Command Line Tools de Xcode (`xcode-select --install`) — no requiere Xcode completo
-- ~3 GB de disco para el modelo Whisper full-precision (se descarga en el primer arranque; la primera carga tarda ~9-10 min por la compilación CoreML — las siguientes son rápidas)
+- ~1 GB de disco para el modelo Whisper cuantizado (se descarga en el primer arranque; esa primera carga incluye el prewarm ANE/CoreML y puede tardar varios minutos — las siguientes son rápidas)
 
 ## Build & run
 
@@ -43,4 +43,4 @@ Módulos SPM: `KikiCore` (máquina de estados) · `KikiAudio` (mic → 16 kHz mo
 
 - Cancelar con Esc durante la grabación (spec §3) no está cableado aún — `cancel()` existe y está testeado; se conecta junto con el modo wake-word en Fase 2.
 - Fallo de inserción notifica solo por log (la notificación visual llega con el onboarding de Fase 4).
-- Modelo actual: `openai_whisper-large-v3_turbo` (3.0 GB). Variante cuantizada `large-v3_turbo_954MB` disponible como swap de 1 línea — decisión pendiente con datos de latencia reales.
+- Modelo actual: `openai_whisper-large-v3_turbo_954MB` (cuantizado) con `prewarm: true`. **Decisión 2026-07-06:** la variante full-precision (3 GB) disparaba compilaciones ANE de 10-30 min en la primera inferencia (ANECompilerService al 95% CPU, app bloqueada en "Procesando…") y se re-pagaban tras cada rebuild por la firma ad-hoc. Con la cuantizada + prewarm, la compilación ocurre en la carga y la inferencia queda en segundos.
