@@ -1,6 +1,9 @@
 APP := build/kiki.app
 BIN := .build/release/Kiki
-SIGN_ID ?= -
+# Identidad local estable (cert self-signed "kiki-dev" en el login keychain).
+# Mantiene la misma firma entre rebuilds → los permisos TCC (Accesibilidad) y
+# el cache de compilación ANE/CoreML sobreviven. Fallback ad-hoc: make SIGN_ID=-
+SIGN_ID ?= kiki-dev
 
 .PHONY: build test bundle run clean
 

@@ -32,7 +32,11 @@ KIKI_STT_TEST=1 swift test --filter WhisperTranscriberIntegrationTests
 
    > Importante: tras conceder Accesibilidad por primera vez, **reinicia kiki** — el monitor global de teclado registrado antes del permiso no se reactiva solo.
 
-> Nota dev: con firma ad-hoc, tras cada rebuild puede hacer falta re-toggle del permiso de Accesibilidad.
+> Nota dev: la app se firma con el cert local estable `kiki-dev` (login keychain), así los
+> permisos TCC y el cache ANE/CoreML sobreviven a los rebuilds. Si no existe el cert
+> (máquina nueva): generarlo con openssl (`extendedKeyUsage=codeSigning`), exportar p12
+> `-legacy`, `security import -T /usr/bin/codesign` y `security add-trusted-cert -p codeSign`.
+> Fallback sin cert: `make SIGN_ID=-` (ad-hoc; re-toggle de Accesibilidad tras cada rebuild).
 > Recomendado: System Settings → Keyboard → "Press 🌐 key to" → **Do Nothing**.
 
 ## Arquitectura
