@@ -151,8 +151,14 @@ public final class SpeechSegmenter {
     }
 
     private func processSpeechState(chunk: [Float], isSpeech: Bool) -> SegmenterEvent {
-        // Check if segment exceeds max duration BEFORE adding to samples
-        let wouldExceedMax = Double(accumulatedSampleCount + chunk.count) / sampleRate >= config.maxSegmentDuration
+        // Check if segment exceeds max duration BEFORE adding to samples.
+        // Must include any pending trailingModeSilenceSamples: if isSpeech is true
+        // below, that trailing silence gets flushed into the segment in this same
+        // call. Checking accumulatedSampleCount + chunk.count alone (without the
+        // pending flush) would let a near-boundary dip-then-resume push the segment
+        // past maxSegmentDuration for one extra chunk before the cap is caught.
+        let projectedSampleCount = accumulatedSampleCount + trailingModeSilenceSamples.count + chunk.count
+        let wouldExceedMax = Double(projectedSampleCount) / sampleRate >= config.maxSegmentDuration
         if wouldExceedMax {
             // Max duration exceeded; discard and enter awaitingSilence
             state = .awaitingSilence
@@ -160,6 +166,12 @@ public final class SpeechSegmenter {
             accumulatedSpeechSamples = []
             trailingModeSilenceSamples = []
             accumulatedSampleCount = 0
+            // Clear pre-roll on discard: the ring may hold speech from the
+            // just-discarded monologue rather than genuine silence, so it must
+            // not leak into whatever segment starts next. Contrast with
+            // resetSegment() below, which intentionally keeps the pre-roll —
+            // on a normal segment end the ring already holds real silence and
+            // self-heals within ~0.3s regardless.
             preRollBuffer = [] // Clear pre-roll on discard
             return .segmentDiscarded(reason: "máximo")
         }
@@ -228,26 +240,6 @@ public final class SpeechSegmenter {
     }
 
     // MARK: - Helper: Emit completed segment
-    /// Called when transitioning from speech→silence with enough silence sustained.
-    /// Combines pre-roll + speech samples and checks duration constraints.
-    /// Does NOT include trailing silence (used for normal segment end).
-    private func emitSegment() -> SegmenterEvent {
-        let speechDurationSeconds = Double(accumulatedSampleCount) / sampleRate
-
-        if speechDurationSeconds < config.minSpeechDuration {
-            // Too short; discard
-            resetSegment()
-            return .segmentDiscarded(reason: "corto")
-        }
-
-        // Combine pre-roll + speech, excluding trailing silence
-        var finalSamples = preRollBuffer
-        finalSamples.append(contentsOf: accumulatedSpeechSamples)
-
-        resetSegment()
-        return .segmentEnded(samples: finalSamples)
-    }
-
     /// Emit segment with trailing silence limited to ~0.2s tail.
     /// Called when sustained silence (>= endSilence) is detected.
     private func emitSegmentWithTrailingLimit() -> SegmenterEvent {
@@ -278,7 +270,14 @@ public final class SpeechSegmenter {
         trailingModeSilenceSamples = []
         accumulatedSampleCount = 0
         accumulatedSilenceSamples = 0
-        // Pre-roll buffer is NOT cleared; it stays for the next utterance
+        // Pre-roll buffer is NOT cleared; it stays for the next utterance.
+        // Intentional asymmetry vs. the "máximo" discard path above (which DOES
+        // clear it): a normal segment end is preceded by genuine sustained
+        // silence, so the ring already holds silence and self-heals within its
+        // own ~0.3s window regardless. After a "máximo" discard there was no
+        // silence — the ring may still hold speech from the discarded
+        // monologue — so it must be cleared there to avoid leaking into the
+        // next segment's pre-roll.
     }
 }
 

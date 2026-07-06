@@ -89,9 +89,10 @@ final class SpeechSegmenterTests: XCTestCase {
         )
         let segmenter = SpeechSegmenter(config: config)
 
-        // Simulate ~0.5s of silence
+        // Simulate >=1.0s of pre-speech silence (10 chunks) to fully saturate
+        // the pre-roll ring buffer beyond its 0.3s (4800-sample) cap.
         let silenceChunk = Array(repeating: Float(0.0), count: 1600)
-        for _ in 0..<5 {
+        for _ in 0..<10 {
             _ = segmenter.process(chunk: silenceChunk, rms: 0.01)
         }
 
@@ -118,14 +119,21 @@ final class SpeechSegmenterTests: XCTestCase {
             return
         }
 
-        // Pre-roll: up to 0.3s (~4800 samples, but may be more due to rounding)
-        // Speech: 10 chunks (16000 samples)
-        // Trailing: ~0.2s tail (~3200 samples)
-        // Total: pre-roll (4800-8000) + speech (16000) + tail (0-3200) = 20800-27200
-        let expectedMinSamples = 16000 + 3200  // At least speech + small tail
-        let expectedMaxSamples = 8000 + 16000 + 3200  // Pre-roll + speech + tail
-        XCTAssertGreaterThanOrEqual(samples.count, expectedMinSamples, "Insufficient samples")
-        XCTAssertLessThanOrEqual(samples.count, expectedMaxSamples, "Too many samples in segment")
+        // Pre-roll is capped at 0.3s (4800 samples); speech is exactly 1s
+        // (16000 samples); trailing tail is capped at 0.2s (3200 samples).
+        // Feeding >=1.0s of pre-speech silence (10 chunks) fully saturates the
+        // pre-roll ring buffer beyond its cap, so an uncapped pre-roll
+        // implementation would include far more than 4800 samples and fail
+        // this exact upper bound.
+        let preRollCap = 4800
+        let speechSamples = 16000
+        let tailAllowance = 3200
+        XCTAssertGreaterThanOrEqual(samples.count, speechSamples, "Insufficient samples")
+        XCTAssertLessThanOrEqual(
+            samples.count,
+            preRollCap + speechSamples + tailAllowance,
+            "Too many samples in segment; pre-roll cap may be broken"
+        )
     }
 
     // MARK: - Minimum speech duration
@@ -194,6 +202,77 @@ final class SpeechSegmenterTests: XCTestCase {
 
         guard case .segmentDiscarded(let reason) = discardedEvent else {
             XCTFail("Expected segmentDiscarded event")
+            return
+        }
+        XCTAssertEqual(reason, "máximo")
+    }
+
+    // MARK: - Max duration must be enforced across a dip-then-resume, not one chunk late
+    /// Regression test for the max-duration overshoot bug: `wouldExceedMax` was computed
+    /// from `accumulatedSampleCount + chunk.count` BEFORE the pending
+    /// `trailingModeSilenceSamples` flush (which happens in the same call when speech
+    /// resumes) added more samples. A near-boundary dip that resumes into speech let the
+    /// internal segment exceed `maxSegmentDuration` for one extra chunk before the
+    /// "máximo" discard fired on the NEXT chunk.
+    ///
+    /// Numbers (16kHz, 1600 samples/chunk = 0.1s):
+    /// - maxSegmentDuration = 1.5s (24000 samples), endSilence = 0.7s (11200 samples)
+    /// - Speech: 8 chunks = 0.8s (12800 samples)
+    /// - Dip: 6 chunks = 0.6s (9600 samples) of silence, below endSilence so no emit
+    /// - Resume: 1 speech chunk (1600 samples)
+    ///
+    /// Buggy check on resume: (12800 + 1600) / 16000 = 0.9s < 1.5s -> no discard;
+    /// the resume chunk is let through as .none. Internal accumulation after the
+    /// trailing-silence flush lands exactly at (12800 + 9600 + 1600) / 16000 = 1.5s
+    /// (the cap) without ever being flagged, so the very next chunk pushes it to
+    /// 1.6s (0.1s PAST the cap) before "máximo" finally fires — one chunk late.
+    /// The fix must include the pending trailing-silence count in the check so the
+    /// discard fires on this exact resume call, never letting accumulation reach or
+    /// pass the cap unflagged.
+    func testMaxSegmentCapEnforcedOnDipThenResume() {
+        let config = makeConfig(
+            endSilence: 0.7,
+            minSpeechDuration: 0.4,
+            maxSegmentDuration: 1.5
+        )
+        let segmenter = SpeechSegmenter(config: config)
+
+        let silenceChunk = Array(repeating: Float(0.0), count: 1600)
+        let speechChunk = Array(repeating: Float(0.5), count: 1600)
+
+        // Initial silence
+        for _ in 0..<5 {
+            _ = segmenter.process(chunk: silenceChunk, rms: 0.01)
+        }
+
+        // Speech: 0.8s total (1 speechStarted chunk + 7 more)
+        var priorEvents: [SegmenterEvent] = []
+        priorEvents.append(segmenter.process(chunk: speechChunk, rms: 0.05)) // speechStarted
+        for _ in 0..<7 {
+            priorEvents.append(segmenter.process(chunk: speechChunk, rms: 0.05))
+        }
+
+        // Dip: 0.6s of silence, strictly under endSilence (0.7s) so no segment emitted
+        for _ in 0..<6 {
+            priorEvents.append(segmenter.process(chunk: silenceChunk, rms: 0.01))
+        }
+
+        // Sanity: nothing was discarded or ended before the resume chunk
+        for event in priorEvents {
+            if case .segmentDiscarded = event {
+                XCTFail("Should not discard before the cap is actually crossed")
+            }
+            if case .segmentEnded = event {
+                XCTFail("Dip is under endSilence; should not emit a segment yet")
+            }
+        }
+
+        // Resume speech: this exact chunk crosses the cap once the pending
+        // trailing-silence flush is accounted for. The discard must fire HERE.
+        let resumeEvent = segmenter.process(chunk: speechChunk, rms: 0.05)
+
+        guard case .segmentDiscarded(let reason) = resumeEvent else {
+            XCTFail("Expected segmentDiscarded(\"máximo\") on the resume chunk that crosses the cap, got \(resumeEvent)")
             return
         }
         XCTAssertEqual(reason, "máximo")
