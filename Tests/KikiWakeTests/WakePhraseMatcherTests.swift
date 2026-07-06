@@ -60,13 +60,13 @@ final class WakePhraseMatcherTests: XCTestCase {
     // MARK: - Preamble handling (≤2 words tolerated)
 
     func testShortPreambleOneWord() {
-        let result = WakePhraseMatcher.match("oye escuchame kiki")
+        let result = WakePhraseMatcher.match("hey listen to me kiki")
         XCTAssertNotNil(result)
         XCTAssertEqual(result?.remainder, "")
     }
 
     func testShortPreambleTwoWords() {
-        let result = WakePhraseMatcher.match("hey listen to me kiki")
+        let result = WakePhraseMatcher.match("hey there listen to me kiki")
         XCTAssertNotNil(result)
         XCTAssertEqual(result?.remainder, "")
     }

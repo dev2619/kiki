@@ -55,7 +55,7 @@ public enum WakePhraseMatcher {
     private static func normalizeWord(_ word: String) -> String {
         word
             .lowercased()
-            .folding(options: .diacriticInsensitive, locale: .current)
+            .folding(options: .diacriticInsensitive, locale: nil) // locale nil = folding independiente del locale del sistema (determinístico entre máquinas)
             .trimmingCharacters(in: .punctuationCharacters)
     }
 
