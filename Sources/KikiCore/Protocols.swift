@@ -45,3 +45,30 @@ public protocol Refining: AnyObject {
     /// Devuelve el texto refinado. Lanza si falla; el controller degrada a crudo.
     func refine(_ text: String, profile: AppProfile) async throws -> String
 }
+
+public struct HistoryRecord: Equatable {
+    public let rawText: String
+    public let finalText: String
+    public let profile: AppProfile
+    public let audioSeconds: Double
+
+    public init(rawText: String, finalText: String, profile: AppProfile, audioSeconds: Double) {
+        self.rawText = rawText
+        self.finalText = finalText
+        self.profile = profile
+        self.audioSeconds = audioSeconds
+    }
+}
+
+public protocol HistoryRecording: AnyObject {
+    func record(_ entry: HistoryRecord)
+}
+
+public protocol SnippetExpanding: AnyObject {
+    /// Devuelve la plantilla si el texto (dictado completo) coincide con un trigger; nil si no.
+    func expand(_ text: String) -> String?
+}
+
+public protocol DictionaryProviding: AnyObject {
+    func terms() -> [String]
+}

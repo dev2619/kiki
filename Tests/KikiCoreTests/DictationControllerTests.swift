@@ -82,6 +82,24 @@ final class SpyDelegate: DictationControllerDelegate {
     func dictationDidFail(_ error: DictationError) { errors.append(error) }
 }
 
+final class MockSnippets: SnippetExpanding {
+    var matchesToReturn: [String: String] = [:] // trigger -> template
+    var expandInvocations: [String] = []
+
+    func expand(_ text: String) -> String? {
+        expandInvocations.append(text)
+        return matchesToReturn[text]
+    }
+}
+
+final class MockHistory: HistoryRecording {
+    var recordings: [HistoryRecord] = []
+
+    func record(_ entry: HistoryRecord) {
+        recordings.append(entry)
+    }
+}
+
 // MARK: - Tests
 
 @MainActor
@@ -428,5 +446,203 @@ final class DictationControllerTests: XCTestCase {
         // Only the initial .recording state should have been captured
         XCTAssertEqual(delegate.states.count, statesAfterPress)
         XCTAssertTrue(delegate.errors.isEmpty)
+    }
+
+    // MARK: - Snippet + History Tests (Phase 3)
+
+    func test_snippetMatchInsertsTemplateAndSkipsLLM() async {
+        let refiner = MockRefiner()
+        refiner.textToReturn = "refined output"
+        let snippets = MockSnippets()
+        snippets.matchesToReturn = ["hello": "Hello,\n\nHow can I help you?"]
+        let context = MockContext()
+
+        controller = DictationController(
+            recorder: recorder, transcriber: transcriber, inserter: inserter,
+            refiner: refiner, context: context,
+            snippets: snippets, history: nil)
+        controller.delegate = delegate
+
+        transcriber.textToReturn = "hello"
+        controller.hotkeyPressed()
+        await controller.hotkeyReleased()
+
+        // Template should be inserted, not refined output
+        XCTAssertEqual(inserter.inserted, ["Hello,\n\nHow can I help you?"])
+        // Refiner should not have been called
+        XCTAssertTrue(refiner.receivedTexts.isEmpty)
+        // Snippet expansion should have been called
+        XCTAssertEqual(snippets.expandInvocations, ["hello"])
+        XCTAssertEqual(controller.state, .idle)
+    }
+
+    func test_snippetMissFollowsNormalFlow() async {
+        let refiner = MockRefiner()
+        refiner.textToReturn = "refined output"
+        let snippets = MockSnippets()
+        snippets.matchesToReturn = ["hello": "template"] // no match for "world"
+        let context = MockContext()
+
+        controller = DictationController(
+            recorder: recorder, transcriber: transcriber, inserter: inserter,
+            refiner: refiner, context: context,
+            snippets: snippets, history: nil)
+        controller.delegate = delegate
+
+        transcriber.textToReturn = "world"
+        controller.hotkeyPressed()
+        await controller.hotkeyReleased()
+
+        // Should follow normal refined flow
+        XCTAssertEqual(inserter.inserted, ["refined output"])
+        // Refiner should have been called
+        XCTAssertEqual(refiner.receivedTexts, ["world"])
+        // Snippet expansion should have been called
+        XCTAssertEqual(snippets.expandInvocations, ["world"])
+        XCTAssertEqual(controller.state, .idle)
+    }
+
+    func test_historyRecordsRawAndFinal() async {
+        let refiner = MockRefiner()
+        refiner.textToReturn = "refined text"
+        let context = MockContext()
+        context.profileToReturn = .code
+        let history = MockHistory()
+
+        controller = DictationController(
+            recorder: recorder, transcriber: transcriber, inserter: inserter,
+            refiner: refiner, context: context,
+            snippets: nil, history: history)
+        controller.delegate = delegate
+
+        transcriber.textToReturn = "raw text"
+        controller.hotkeyPressed()
+        await controller.hotkeyReleased()
+
+        XCTAssertEqual(history.recordings.count, 1)
+        let record = history.recordings[0]
+        XCTAssertEqual(record.rawText, "raw text")
+        XCTAssertEqual(record.finalText, "refined text")
+        XCTAssertEqual(record.profile, .code)
+        XCTAssertEqual(record.audioSeconds, 1.0) // 16_000 samples / 16_000 sampleRate
+    }
+
+    func test_historyRecordsFallbackAsRawEqualsFinal() async {
+        let refiner = MockRefiner()
+        refiner.errorToThrow = NSError(domain: "test", code: 1)
+        let context = MockContext()
+        context.profileToReturn = .email
+        let history = MockHistory()
+
+        controller = DictationController(
+            recorder: recorder, transcriber: transcriber, inserter: inserter,
+            refiner: refiner, context: context,
+            snippets: nil, history: history)
+        controller.delegate = delegate
+
+        transcriber.textToReturn = "crudo"
+        controller.hotkeyPressed()
+        await controller.hotkeyReleased()
+
+        XCTAssertEqual(history.recordings.count, 1)
+        let record = history.recordings[0]
+        XCTAssertEqual(record.rawText, "crudo")
+        XCTAssertEqual(record.finalText, "crudo") // fallback: raw == final
+        XCTAssertEqual(record.profile, .email)
+    }
+
+    func test_snippetMatchRecordsHistory() async {
+        let snippets = MockSnippets()
+        snippets.matchesToReturn = ["trigger": "template text"]
+        let context = MockContext()
+        context.profileToReturn = .chat
+        let history = MockHistory()
+
+        controller = DictationController(
+            recorder: recorder, transcriber: transcriber, inserter: inserter,
+            context: context,
+            snippets: snippets, history: history)
+        controller.delegate = delegate
+
+        transcriber.textToReturn = "trigger"
+        controller.hotkeyPressed()
+        await controller.hotkeyReleased()
+
+        XCTAssertEqual(history.recordings.count, 1)
+        let record = history.recordings[0]
+        XCTAssertEqual(record.rawText, "trigger")
+        XCTAssertEqual(record.finalText, "template text")
+        XCTAssertEqual(record.profile, .chat)
+    }
+
+    func test_nilSnippetsAndHistoryPreservePhase2Behavior() async {
+        let refiner = MockRefiner()
+        refiner.textToReturn = "refined"
+        let context = MockContext()
+
+        // Explicitly nil (no snippets, no history)
+        controller = DictationController(
+            recorder: recorder, transcriber: transcriber, inserter: inserter,
+            refiner: refiner, context: context,
+            snippets: nil, history: nil)
+        controller.delegate = delegate
+
+        transcriber.textToReturn = "test"
+        controller.hotkeyPressed()
+        await controller.hotkeyReleased()
+
+        XCTAssertEqual(inserter.inserted, ["refined"])
+        XCTAssertEqual(controller.state, .idle)
+    }
+
+    func test_audioSecondsComputedFromSamples() async {
+        let history = MockHistory()
+        controller = DictationController(
+            recorder: recorder, transcriber: transcriber, inserter: inserter,
+            snippets: nil, history: history)
+        controller.delegate = delegate
+
+        // 32_000 samples at 16_000 Hz = 2.0 seconds
+        recorder.samplesToReturn = Array(repeating: 0.1, count: 32_000)
+        transcriber.textToReturn = "hello"
+
+        controller.hotkeyPressed()
+        await controller.hotkeyReleased()
+
+        XCTAssertEqual(history.recordings.count, 1)
+        let record = history.recordings[0]
+        XCTAssertEqual(record.audioSeconds, 2.0)
+    }
+
+    func test_processTranscriptPassesZeroAudioSeconds() async {
+        let history = MockHistory()
+        controller = DictationController(
+            recorder: recorder, transcriber: transcriber, inserter: inserter,
+            snippets: nil, history: history)
+        controller.delegate = delegate
+
+        await controller.processTranscript("hello world")
+
+        XCTAssertEqual(history.recordings.count, 1)
+        let record = history.recordings[0]
+        XCTAssertEqual(record.audioSeconds, 0.0)
+    }
+
+    func test_historyNotRecordedOnInsertionFailure() async {
+        let history = MockHistory()
+        inserter.errorToThrow = DictationError.insertionFailed("failed")
+        controller = DictationController(
+            recorder: recorder, transcriber: transcriber, inserter: inserter,
+            snippets: nil, history: history)
+        controller.delegate = delegate
+
+        transcriber.textToReturn = "hello"
+        controller.hotkeyPressed()
+        await controller.hotkeyReleased()
+
+        // No history record on insertion failure
+        XCTAssertTrue(history.recordings.isEmpty)
+        XCTAssertEqual(controller.state, .idle)
+        XCTAssertFalse(delegate.errors.isEmpty)
     }
 }

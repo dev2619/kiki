@@ -30,6 +30,9 @@ public final class DictationController {
     private let refiner: Refining?
     private let context: ContextProviding?
     private let refineTimeout: TimeInterval
+    private let sampleRate: Double
+    private let snippets: SnippetExpanding?
+    private let history: HistoryRecording?
 
     public init(
         recorder: AudioRecording,
@@ -39,7 +42,9 @@ public final class DictationController {
         sampleRate: Double = 16_000,
         refiner: Refining? = nil,
         context: ContextProviding? = nil,
-        refineTimeout: TimeInterval = 5
+        refineTimeout: TimeInterval = 5,
+        snippets: SnippetExpanding? = nil,
+        history: HistoryRecording? = nil
     ) {
         self.recorder = recorder
         self.transcriber = transcriber
@@ -48,6 +53,9 @@ public final class DictationController {
         self.refiner = refiner
         self.context = context
         self.refineTimeout = refineTimeout
+        self.sampleRate = sampleRate
+        self.snippets = snippets
+        self.history = history
     }
 
     public func hotkeyPressed() {
@@ -81,11 +89,12 @@ public final class DictationController {
     private func transcribeAndProcess(_ samples: [Float]) async {
         transition(to: .processing)
         do {
-            KikiLog.log("kiki core: transcribiendo \(samples.count) muestras (\(String(format: "%.1f", Double(samples.count) / 16_000))s de audio)")
+            let audioSeconds = Double(samples.count) / sampleRate
+            KikiLog.log("kiki core: transcribiendo \(samples.count) muestras (\(String(format: "%.1f", audioSeconds))s de audio)")
             let started = Date()
             let text = try await transcriber.transcribe(samples)
             KikiLog.log("kiki core: transcripción lista en \(String(format: "%.2f", Date().timeIntervalSince(started)))s — \(text.count) chars: \"\(text)\"")
-            await processTranscriptContent(text)
+            await processTranscriptContent(text, audioSeconds: audioSeconds)
         } catch let error as DictationError {
             transition(to: .idle)
             delegate?.dictationDidFail(error)
@@ -100,16 +109,31 @@ public final class DictationController {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         transition(to: .processing)
-        await processTranscriptContent(text)
+        await processTranscriptContent(text, audioSeconds: 0)
     }
 
-    private func processTranscriptContent(_ text: String) async {
+    private func processTranscriptContent(_ text: String, audioSeconds: Double = 0) async {
         do {
             let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
             if !trimmed.isEmpty {
+                // Phase 3: Snippet expansion pre-pass
+                if let template = snippets?.expand(trimmed) {
+                    try inserter.insert(template)
+                    KikiLog.log("kiki core: snippet expandido")
+                    let profile = context?.currentProfile() ?? .neutral
+                    history?.record(HistoryRecord(rawText: trimmed, finalText: template, profile: profile, audioSeconds: audioSeconds))
+                    transition(to: .idle)
+                    return
+                }
+
+                // Phase 2: Refinement
                 let final = await refineOrFallback(trimmed)
                 try inserter.insert(final)
                 KikiLog.log("kiki core: texto insertado")
+
+                // History recording
+                let profile = context?.currentProfile() ?? .neutral
+                history?.record(HistoryRecord(rawText: trimmed, finalText: final, profile: profile, audioSeconds: audioSeconds))
             } else {
                 KikiLog.log("kiki core: transcripción vacía, nada que insertar")
             }
