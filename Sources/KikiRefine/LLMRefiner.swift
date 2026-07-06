@@ -4,6 +4,30 @@ import MLX
 import MLXLLM
 import MLXLMCommon
 
+// MARK: - Metal build constraint (léase antes de tocar builds/CI de este target)
+//
+// El target `Cmlx` de `mlx-swift` compila shaders `.metal` a un `default.metallib`
+// vía el sistema de build de Xcode (integración con el compilador Metal). El CLI
+// puro de SwiftPM (`swift build` / `swift test`) NO tiene esa integración, así
+// que `swift build` compila este target sin problema (no requiere Metal en build
+// time) pero cualquier ejecución en runtime que toque GPU/MLXArray revienta con
+// "Failed to load the default metallib" si el proceso host no vino de xcodebuild.
+// Cita del README de mlx-swift: "the ultimate build has to be done via Xcode".
+// Consecuencias prácticas:
+//   - El target de la app (`Kiki`, que enlaza `KikiRefine`) debe compilarse con
+//     xcodebuild, no con `swift build` — Task 5 cambia el Makefile para reflejar
+//     esto.
+//   - El test gated de este archivo (`LLMRefinerIntegrationTests`) requiere
+//     xcodebuild, no `swift test`:
+//     TEST_RUNNER_KIKI_LLM_TEST=1 xcodebuild test -scheme kiki \
+//       -destination 'platform=macOS' \
+//       -only-testing:KikiRefineTests/LLMRefinerIntegrationTests
+//     (requiere el Metal Toolchain de Xcode instalado:
+//     `xcodebuild -downloadComponent MetalToolchain`; variable de entorno vía el
+//     prefijo `TEST_RUNNER_` porque xcodebuild no hereda el shell env al proceso
+//     de test). Ver `.superpowers/sdd/task-2a4-report.md` para la investigación
+//     completa y evidencia de test.
+//
 /// Refinamiento local con un LLM vía MLX (Apple Silicon / Metal). Descarga el
 /// modelo de Hugging Face en el primer arranque y lo cachea en disco (igual
 /// que `WhisperTranscriber`).

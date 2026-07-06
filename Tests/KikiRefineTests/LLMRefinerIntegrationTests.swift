@@ -2,6 +2,16 @@ import XCTest
 import KikiCore
 @testable import KikiRefine
 
+// MARK: - Metal build constraint
+//
+// MLX no puede inicializar GPU/Metal si el proceso host no vino de xcodebuild
+// (SwiftPM CLI no compila los shaders `.metal` de `mlx-swift`/Cmlx — ver nota
+// completa en `Sources/KikiRefine/LLMRefiner.swift`). Por eso este test gated
+// NO se corre con `swift test`, sino con:
+//   TEST_RUNNER_KIKI_LLM_TEST=1 xcodebuild test -scheme kiki \
+//     -destination 'platform=macOS' \
+//     -only-testing:KikiRefineTests/LLMRefinerIntegrationTests
+//
 /// Test de integración real (modelo Qwen2.5-3B-Instruct-4bit vía MLX).
 /// Se corre solo con: KIKI_LLM_TEST=1 swift test --filter LLMRefinerIntegrationTests
 final class LLMRefinerIntegrationTests: XCTestCase {

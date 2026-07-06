@@ -5,7 +5,7 @@ let package = Package(
     name: "kiki",
     platforms: [.macOS(.v14)],
     dependencies: [
-        .package(url: "https://github.com/argmaxinc/WhisperKit.git", from: "0.9.0"),
+        .package(url: "https://github.com/argmaxinc/WhisperKit.git", from: "1.0.0"),
         .package(url: "https://github.com/ml-explore/mlx-swift-examples", from: "2.25.0"),
         .package(url: "https://github.com/ml-explore/mlx-swift", from: "0.25.0"),
     ],

@@ -6,7 +6,8 @@ import WhisperKit
 /// de Hugging Face en el primer arranque y queda cacheado en disco.
 public final class WhisperTranscriber: Transcribing {
     /// Identificador de modelo resuelto contra el repo HF `argmaxinc/whisperkit-coreml`
-    /// (WhisperKit 0.18 hace glob-match del `model:` contra las carpetas del repo).
+    /// (WhisperKit hace glob-match del `model:` contra las carpetas del repo;
+    /// comportamiento verificado en 1.0.0, ver nota de versión en `Package.swift`).
     /// Variante CUANTIZADA (954MB) de large-v3 turbo: la full-precision (3GB)
     /// dispara compilaciones ANE de 10-30 min en la primera inferencia — inviable
     /// para dictado (confirmado 2026-07-06: ANECompilerService al 95% CPU con
@@ -40,11 +41,13 @@ public final class WhisperTranscriber: Transcribing {
         }
         // Spec §6: ES/EN como idiomas de primera clase. La auto-detección abierta
         // de Whisper (~100 idiomas) es poco fiable con dictados cortos — eligió
-        // sueco para 2s de español. detectLangauge (sic: typo de WhisperKit 0.18)
-        // solo devuelve el idioma greedy (su langProbs trae únicamente el token
-        // muestreado, no una distribución), así que la restricción es: inglés
-        // solo si Whisper lo detectó explícitamente; cualquier otra cosa se
-        // trata como español (idioma primario del producto en Fase 1).
+        // sueco para 2s de español. detectLangauge (sic: typo histórico de la API
+        // de WhisperKit, mantenido como alias deprecado hasta 1.0.0 — ver
+        // `detectLanguage` sin el typo como sucesor, confirmado en el checkout de
+        // 1.0.0) solo devuelve el idioma greedy (su langProbs trae únicamente el
+        // token muestreado, no una distribución), así que la restricción es:
+        // inglés solo si Whisper lo detectó explícitamente; cualquier otra cosa
+        // se trata como español (idioma primario del producto en Fase 1).
         let (detected, _) = try await whisperKit.detectLangauge(audioArray: samples)
         let language = detected == "en" ? "en" : "es"
         KikiLog.log("kiki stt: idioma \(language) (whisper detectó \(detected))")
