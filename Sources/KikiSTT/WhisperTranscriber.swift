@@ -40,14 +40,14 @@ public final class WhisperTranscriber: Transcribing {
         }
         // Spec §6: ES/EN como idiomas de primera clase. La auto-detección abierta
         // de Whisper (~100 idiomas) es poco fiable con dictados cortos — eligió
-        // sueco para 2s de español. Restringimos: detectamos probabilidades y
-        // decodificamos fijando el más probable entre es/en.
-        // (sic "Langauge": typo en la API pública de WhisperKit 0.18)
-        let (_, langProbs) = try await whisperKit.detectLangauge(audioArray: samples)
-        let esProb = langProbs["es"] ?? 0
-        let enProb = langProbs["en"] ?? 0
-        let language = esProb >= enProb ? "es" : "en"
-        KikiLog.log("kiki stt: idioma \(language) (es=\(String(format: "%.2f", esProb)) en=\(String(format: "%.2f", enProb)))")
+        // sueco para 2s de español. detectLangauge (sic: typo de WhisperKit 0.18)
+        // solo devuelve el idioma greedy (su langProbs trae únicamente el token
+        // muestreado, no una distribución), así que la restricción es: inglés
+        // solo si Whisper lo detectó explícitamente; cualquier otra cosa se
+        // trata como español (idioma primario del producto en Fase 1).
+        let (detected, _) = try await whisperKit.detectLangauge(audioArray: samples)
+        let language = detected == "en" ? "en" : "es"
+        KikiLog.log("kiki stt: idioma \(language) (whisper detectó \(detected))")
         var options = DecodingOptions()
         options.task = .transcribe
         options.language = language
