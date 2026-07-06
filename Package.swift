@@ -24,7 +24,7 @@ let package = Package(
         .target(name: "KikiContext", dependencies: ["KikiCore"]),
         .target(name: "KikiAudio", dependencies: ["KikiCore"]),
         .target(name: "KikiInsert", dependencies: ["KikiCore"]),
-        .target(name: "KikiWake", dependencies: ["KikiCore"]),
+        .target(name: "KikiWake", dependencies: ["KikiCore", "KikiAudio"]),
         .target(
             name: "KikiRefine",
             dependencies: [
