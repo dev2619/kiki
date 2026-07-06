@@ -54,13 +54,16 @@ kiki/
 ├── Kiki (app target)   — menu bar, HUD, settings UI, onboarding de permisos
 ├── KikiCore            — orquestador del pipeline (máquina de estados)
 ├── KikiAudio           — captura de micrófono (AVAudioEngine, 16kHz mono)
-├── KikiWake            — escucha continua ultraligera:
-│                          • openWakeWord con modelos custom para ambas frases
-│                            (ONNX → CoreML), entrenados con audio sintético TTS
-│                            (voces/acentos variados, incluye acento español)
-│                          • Silero VAD para detección de fin de habla
-│                          • Buffer circular en RAM: no se pierde el inicio de
-│                            la frase; nada se persiste sin activación
+├── KikiWake            — escucha continua manos libres:
+│                          • [ENMIENDA 2026-07-06, decisión "híbrido evolutivo"]
+│                            v1: VAD por energía segmenta habla y Whisper (ya
+│                            residente) verifica la frase de activación por
+│                            texto — cero dependencias nuevas, ES/EN desde el
+│                            día 1. openWakeWord (modelo dedicado ~1MB always-on,
+│                            entrenado con TTS sintético) queda en backlog como
+│                            optimización de consumo detrás del mismo protocolo.
+│                          • Detección de fin de habla por silencio (~1.5s)
+│                          • Nada se persiste sin activación (segmentos en RAM)
 ├── KikiSTT             — WhisperKit (CoreML, large-v3-turbo), ES/EN auto-detect
 ├── KikiRefine          — LLM local vía MLX (Qwen 3B 4-bit): limpieza, tono por
 │                          contexto, expansión de snippets
