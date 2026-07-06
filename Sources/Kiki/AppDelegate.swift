@@ -107,9 +107,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             systemSymbolName: symbolName, accessibilityDescription: "kiki")
     }
 
-    @objc private func toggleWake() {
+    @MainActor @objc private func toggleWake() {
         if wakeEnabled {
             wakeListener.stop()
+            hud.showArmed(false)
+            wakePausedByDictation = false
             wakeEnabled = false
             UserDefaults.standard.set(false, forKey: Self.wakeEnabledKey)
         } else {
@@ -188,8 +190,9 @@ extension AppDelegate: DictationControllerDelegate {
         // falsos positivos de la frase de activación.
         if state != .idle && wakeEnabled {
             wakeListener.stop()
+            hud.showArmed(false)
             wakePausedByDictation = true
-        } else if state == .idle && wakePausedByDictation {
+        } else if state == .idle && wakePausedByDictation && wakeEnabled {
             try? wakeListener.start()
             wakePausedByDictation = false
         }
