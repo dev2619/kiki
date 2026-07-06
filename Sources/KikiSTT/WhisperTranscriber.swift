@@ -38,9 +38,20 @@ public final class WhisperTranscriber: Transcribing {
         guard let whisperKit else {
             throw DictationError.transcriptionFailed("el modelo todavía no está cargado")
         }
+        // Spec §6: ES/EN como idiomas de primera clase. La auto-detección abierta
+        // de Whisper (~100 idiomas) es poco fiable con dictados cortos — eligió
+        // sueco para 2s de español. Restringimos: detectamos probabilidades y
+        // decodificamos fijando el más probable entre es/en.
+        // (sic "Langauge": typo en la API pública de WhisperKit 0.18)
+        let (_, langProbs) = try await whisperKit.detectLangauge(audioArray: samples)
+        let esProb = langProbs["es"] ?? 0
+        let enProb = langProbs["en"] ?? 0
+        let language = esProb >= enProb ? "es" : "en"
+        KikiLog.log("kiki stt: idioma \(language) (es=\(String(format: "%.2f", esProb)) en=\(String(format: "%.2f", enProb)))")
         var options = DecodingOptions()
         options.task = .transcribe
-        options.detectLanguage = true // ES/EN auto (spec §6)
+        options.language = language
+        options.detectLanguage = false
         KikiLog.log("kiki stt: inferencia iniciada (\(samples.count) muestras) — la primera tras arrancar puede tardar por compilación ANE/CoreML")
         let started = Date()
         let results = try await whisperKit.transcribe(audioArray: samples, decodeOptions: options)
