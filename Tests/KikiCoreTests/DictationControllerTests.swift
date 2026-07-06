@@ -348,4 +348,84 @@ final class DictationControllerTests: XCTestCase {
         XCTAssertEqual(controller.state, .idle)
         XCTAssertEqual(delegate.states, [.recording, .processing, .idle])
     }
+
+    // MARK: - Direct Process Tests
+
+    func test_processSamplesRunsFullPipeline() async {
+        let validSamples: [Float] = Array(repeating: 0.1, count: 16_000) // 1 s >= minimumSamples
+        transcriber.textToReturn = "hello world"
+
+        await controller.process(samples: validSamples)
+
+        XCTAssertEqual(controller.state, .idle)
+        XCTAssertEqual(inserter.inserted, ["hello world"])
+        XCTAssertTrue(delegate.states.contains(.processing))
+        XCTAssertEqual(transcriber.receivedSamples.count, 16_000)
+    }
+
+    func test_processSamplesRespectsMinimumDuration() async {
+        let shortSamples: [Float] = Array(repeating: 0.1, count: 1_000) // < 0.3 s * 16 kHz
+        transcriber.textToReturn = "hello world"
+
+        await controller.process(samples: shortSamples)
+
+        XCTAssertEqual(controller.state, .idle)
+        XCTAssertTrue(inserter.inserted.isEmpty)
+        XCTAssertTrue(transcriber.receivedSamples.isEmpty)
+        XCTAssertTrue(delegate.states.isEmpty)
+    }
+
+    func test_processTranscriptRefinesAndInserts() async {
+        let refiner = MockRefiner()
+        refiner.textToReturn = "texto pulido."
+        let context = MockContext()
+        controller = DictationController(
+            recorder: recorder, transcriber: transcriber, inserter: inserter,
+            refiner: refiner, context: context)
+        controller.delegate = delegate
+
+        await controller.processTranscript("hello world")
+
+        XCTAssertEqual(inserter.inserted, ["texto pulido."])
+        XCTAssertEqual(refiner.receivedTexts, ["hello world"])
+        XCTAssertTrue(delegate.states.contains(.processing))
+        XCTAssertEqual(controller.state, .idle)
+    }
+
+    func test_processTranscriptEmptyIsNoop() async {
+        let refiner = MockRefiner()
+        refiner.textToReturn = "texto pulido."
+        let context = MockContext()
+        controller = DictationController(
+            recorder: recorder, transcriber: transcriber, inserter: inserter,
+            refiner: refiner, context: context)
+        controller.delegate = delegate
+
+        let statesBefore = delegate.states.count
+        await controller.processTranscript("   \n  ")
+
+        XCTAssertTrue(inserter.inserted.isEmpty)
+        XCTAssertTrue(refiner.receivedTexts.isEmpty)
+        // Empty transcript should not trigger transitions (stays at initial count)
+        XCTAssertEqual(delegate.states.count, statesBefore)
+        XCTAssertEqual(controller.state, .idle)
+    }
+
+    func test_processWhileBusyIsIgnored() async {
+        let validSamples: [Float] = Array(repeating: 0.1, count: 16_000)
+        transcriber.textToReturn = "hello world"
+
+        // Simulate busy state by starting recording
+        controller.hotkeyPressed()
+        let statesAfterPress = delegate.states.count
+
+        // Call process while in a non-idle state (.recording)
+        await controller.process(samples: validSamples)
+
+        // Should ignore the process call (no new state transitions beyond what happened)
+        XCTAssertEqual(controller.state, .recording)
+        XCTAssertTrue(inserter.inserted.isEmpty)
+        // Only the initial .recording state should have been captured
+        XCTAssertEqual(delegate.states.count, statesAfterPress)
+    }
 }

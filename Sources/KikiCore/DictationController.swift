@@ -73,6 +73,47 @@ public final class DictationController {
             let started = Date()
             let text = try await transcriber.transcribe(samples)
             KikiLog.log("kiki core: transcripción lista en \(String(format: "%.2f", Date().timeIntervalSince(started)))s — \(text.count) chars: \"\(text)\"")
+            await processTranscriptContent(text)
+        } catch let error as DictationError {
+            transition(to: .idle)
+            delegate?.dictationDidFail(error)
+        } catch {
+            transition(to: .idle)
+            delegate?.dictationDidFail(.transcriptionFailed(String(describing: error)))
+        }
+    }
+
+    public func process(samples: [Float]) async {
+        guard state == .idle else { return }
+        guard samples.count >= minimumSamples else {
+            return // tap accidental
+        }
+        transition(to: .processing)
+        do {
+            KikiLog.log("kiki core: transcribiendo \(samples.count) muestras (\(String(format: "%.1f", Double(samples.count) / 16_000))s de audio)")
+            let started = Date()
+            let text = try await transcriber.transcribe(samples)
+            KikiLog.log("kiki core: transcripción lista en \(String(format: "%.2f", Date().timeIntervalSince(started)))s — \(text.count) chars: \"\(text)\"")
+            await processTranscriptContent(text)
+        } catch let error as DictationError {
+            transition(to: .idle)
+            delegate?.dictationDidFail(error)
+        } catch {
+            transition(to: .idle)
+            delegate?.dictationDidFail(.transcriptionFailed(String(describing: error)))
+        }
+    }
+
+    public func processTranscript(_ text: String) async {
+        guard state == .idle else { return }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        transition(to: .processing)
+        await processTranscriptContent(text)
+    }
+
+    private func processTranscriptContent(_ text: String) async {
+        do {
             let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
             if !trimmed.isEmpty {
                 let final = await refineOrFallback(trimmed)
