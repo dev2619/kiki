@@ -152,12 +152,17 @@ public final class SpeechSegmenter {
 
     private func processSpeechState(chunk: [Float], isSpeech: Bool) -> SegmenterEvent {
         // Check if segment exceeds max duration BEFORE adding to samples.
-        // Must include any pending trailingModeSilenceSamples: if isSpeech is true
-        // below, that trailing silence gets flushed into the segment in this same
-        // call. Checking accumulatedSampleCount + chunk.count alone (without the
-        // pending flush) would let a near-boundary dip-then-resume push the segment
-        // past maxSegmentDuration for one extra chunk before the cap is caught.
-        let projectedSampleCount = accumulatedSampleCount + trailingModeSilenceSamples.count + chunk.count
+        // Pending trailingModeSilenceSamples count toward the cap ONLY on the
+        // speech path: that is when they get flushed into the segment in this
+        // same call, so ignoring them would let a near-boundary dip-then-resume
+        // push the segment past maxSegmentDuration one chunk before the cap is
+        // caught. On the silence path the pending silence never enters the
+        // segment (beyond the capped ~0.2s tail at emission), so counting it
+        // there would falsely discard any valid utterance longer than
+        // (maxSegmentDuration - endSilence) during its normal end-of-utterance
+        // silence.
+        let pendingFlushCount = isSpeech ? trailingModeSilenceSamples.count : 0
+        let projectedSampleCount = accumulatedSampleCount + pendingFlushCount + chunk.count
         let wouldExceedMax = Double(projectedSampleCount) / sampleRate >= config.maxSegmentDuration
         if wouldExceedMax {
             // Max duration exceeded; discard and enter awaitingSilence

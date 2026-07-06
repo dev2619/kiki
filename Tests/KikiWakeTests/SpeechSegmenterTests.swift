@@ -207,6 +207,65 @@ final class SpeechSegmenterTests: XCTestCase {
         XCTAssertEqual(reason, "máximo")
     }
 
+    // MARK: - Valid utterance near the cap must still emit, not falsely discard
+    /// Regression test for the fix-round-1 overcorrection: counting pending
+    /// `trailingModeSilenceSamples` toward the cap on EVERY chunk (including the
+    /// silence path) falsely discarded valid utterances. The pending silence only
+    /// flushes into the segment when speech RESUMES; on sustained end-of-utterance
+    /// silence it never enters the segment (beyond the capped ~0.2s tail), so it
+    /// must not count toward the cap there.
+    ///
+    /// Numbers (16kHz, 1600 samples/chunk = 0.1s), max 1.5s (24000), endSilence 0.7s:
+    /// 1.0s speech (16000) + sustained silence. Buggy projection on the 5th silence
+    /// chunk: 16000 + 6400 pending + 1600 = 24000 >= 24000 -> false "máximo".
+    /// Correct behavior: silence reaches endSilence at 0.7s and emits segmentEnded.
+    /// In general, any utterance longer than maxSegmentDuration - endSilence would
+    /// falsely discard under the buggy projection.
+    func testValidUtteranceNearCapStillEmits() {
+        let config = makeConfig(
+            endSilence: 0.7,
+            minSpeechDuration: 0.4,
+            maxSegmentDuration: 1.5
+        )
+        let segmenter = SpeechSegmenter(config: config)
+
+        let silenceChunk = Array(repeating: Float(0.0), count: 1600)
+        let speechChunk = Array(repeating: Float(0.5), count: 1600)
+
+        // Initial silence
+        for _ in 0..<5 {
+            _ = segmenter.process(chunk: silenceChunk, rms: 0.01)
+        }
+
+        // Valid 1.0s utterance (under the 1.5s cap)
+        _ = segmenter.process(chunk: speechChunk, rms: 0.05) // speechStarted
+        for _ in 0..<9 {
+            let event = segmenter.process(chunk: speechChunk, rms: 0.05)
+            XCTAssertEqual(event, .none, "No event expected during in-cap speech")
+        }
+
+        // Sustained end-of-utterance silence: must emit segmentEnded at endSilence,
+        // never a "máximo" discard.
+        var endedEvent: SegmenterEvent? = nil
+        for _ in 0..<10 {
+            let event = segmenter.process(chunk: silenceChunk, rms: 0.01)
+            if case .segmentDiscarded(let reason) = event {
+                XCTFail("Valid utterance falsely discarded (reason: \(reason)); pending trailing silence must not count toward the cap on the silence path")
+                return
+            }
+            if case .segmentEnded = event {
+                endedEvent = event
+                break
+            }
+        }
+
+        guard case .segmentEnded(let samples) = endedEvent ?? .none else {
+            XCTFail("Expected segmentEnded for a valid utterance ending in sustained silence")
+            return
+        }
+        XCTAssertGreaterThanOrEqual(samples.count, 16000, "Segment should contain the full 1.0s of speech")
+    }
+
     // MARK: - Max duration must be enforced across a dip-then-resume, not one chunk late
     /// Regression test for the max-duration overshoot bug: `wouldExceedMax` was computed
     /// from `accumulatedSampleCount + chunk.count` BEFORE the pending
