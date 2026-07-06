@@ -24,6 +24,7 @@ let package = Package(
         .target(name: "KikiContext", dependencies: ["KikiCore"]),
         .target(name: "KikiAudio", dependencies: ["KikiCore"]),
         .target(name: "KikiInsert", dependencies: ["KikiCore"]),
+        .target(name: "KikiStore", dependencies: ["KikiCore"]),
         .target(name: "KikiWake", dependencies: ["KikiCore", "KikiAudio"]),
         .target(
             name: "KikiRefine",
@@ -49,6 +50,7 @@ let package = Package(
         .testTarget(name: "KikiContextTests", dependencies: ["KikiContext"]),
         .testTarget(name: "KikiAudioTests", dependencies: ["KikiAudio"]),
         .testTarget(name: "KikiInsertTests", dependencies: ["KikiInsert"]),
+        .testTarget(name: "KikiStoreTests", dependencies: ["KikiStore"]),
         .testTarget(name: "KikiWakeTests", dependencies: ["KikiWake"]),
         .testTarget(name: "KikiRefineTests", dependencies: ["KikiRefine"]),
         .testTarget(
