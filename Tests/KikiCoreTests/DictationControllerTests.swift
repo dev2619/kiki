@@ -427,5 +427,6 @@ final class DictationControllerTests: XCTestCase {
         XCTAssertTrue(inserter.inserted.isEmpty)
         // Only the initial .recording state should have been captured
         XCTAssertEqual(delegate.states.count, statesAfterPress)
+        XCTAssertTrue(delegate.errors.isEmpty)
     }
 }

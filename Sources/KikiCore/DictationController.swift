@@ -67,20 +67,7 @@ public final class DictationController {
             transition(to: .idle) // tap accidental
             return
         }
-        transition(to: .processing)
-        do {
-            KikiLog.log("kiki core: transcribiendo \(samples.count) muestras (\(String(format: "%.1f", Double(samples.count) / 16_000))s de audio)")
-            let started = Date()
-            let text = try await transcriber.transcribe(samples)
-            KikiLog.log("kiki core: transcripción lista en \(String(format: "%.2f", Date().timeIntervalSince(started)))s — \(text.count) chars: \"\(text)\"")
-            await processTranscriptContent(text)
-        } catch let error as DictationError {
-            transition(to: .idle)
-            delegate?.dictationDidFail(error)
-        } catch {
-            transition(to: .idle)
-            delegate?.dictationDidFail(.transcriptionFailed(String(describing: error)))
-        }
+        await transcribeAndProcess(samples)
     }
 
     public func process(samples: [Float]) async {
@@ -88,6 +75,10 @@ public final class DictationController {
         guard samples.count >= minimumSamples else {
             return // tap accidental
         }
+        await transcribeAndProcess(samples)
+    }
+
+    private func transcribeAndProcess(_ samples: [Float]) async {
         transition(to: .processing)
         do {
             KikiLog.log("kiki core: transcribiendo \(samples.count) muestras (\(String(format: "%.1f", Double(samples.count) / 16_000))s de audio)")
