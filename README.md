@@ -2,7 +2,7 @@
 
 Dictado por voz con IA, **100% local**, para macOS. Mantén **Fn**, habla, suelta — el texto aparece donde esté tu cursor, en cualquier app. Tu voz nunca sale de tu Mac.
 
-> Fase actual: **2A — refinado local con IA** (hotkey + Whisper local + LLM Qwen2.5-3B + paste).
+> Fase actual: **2B — manos libres** (hotkey + Whisper local + LLM Qwen2.5-3B + paste + wake phrase "escúchame kiki").
 > Spec completo: [`docs/superpowers/specs/2026-07-06-kiki-design.md`](docs/superpowers/specs/2026-07-06-kiki-design.md)
 
 ## Requisitos
@@ -53,7 +53,7 @@ TEST_RUNNER_KIKI_LLM_TEST=1 xcodebuild test -scheme kiki -destination 'platform=
 
 ## Arquitectura
 
-Módulos SPM: `KikiCore` (máquina de estados) · `KikiAudio` (mic → 16 kHz mono) · `KikiSTT` (WhisperKit) · `KikiRefine` (LLM Qwen + tone profiles) · `KikiContext` (app detection + tone mapping) · `KikiInsert` (paste preservando clipboard) · `Kiki` (menu bar app, hotkey, HUD).
+Módulos SPM: `KikiCore` (máquina de estados) · `KikiAudio` (mic → 16 kHz mono) · `KikiSTT` (WhisperKit) · `KikiRefine` (LLM Qwen + tone profiles) · `KikiContext` (app detection + tone mapping) · `KikiInsert` (paste preservando clipboard) · `KikiWake` (wake word detection + VAD) · `Kiki` (menu bar app, hotkey, HUD).
 
 ## Refinado con IA (Fase 2A)
 
@@ -77,7 +77,40 @@ Tras transcribir con Whisper, el texto se pasa a un modelo LLM local (Qwen2.5-3B
 - Si el modelo no se descarga en el inicio, el menú dice "Listo (sin refinado IA)" — la app funciona con Whisper solo (Fase 1).
 - El dictado nunca se pierde: siempre hay algo que insertar.
 
-## Notas de alcance (Fase 2A)
+## Manos libres (Fase 2B)
+
+**Activación:** Menú 🎤 → "Manos libres" (toggle; desactivado por defecto, almacenado en UserDefaults).
+
+**Frases de activación:**
+- **"escúchame kiki"** — inicia grabación de micrófono en modo manos libres
+- **"listen to me kiki"** — variante en inglés (ambas frases detectadas por modelo VAD+Whisper híbrido)
+
+**Flujo de dictado:**
+1. Di la frase de activación → **chime** + "👂 Te escucho…" (HUD naranja con waveform animado)
+2. Dicta el texto (mientras el modo esté activo, el ícono del menú cambia a waveform)
+3. **Silencio de 1.5 segundos** → fin de grabación, transcripción y refinado (mismo flujo que hotkey)
+4. Texto insertado donde esté el cursor
+
+**Dictado en el mismo aliento:** Puedes decir la frase y el texto en una sola oración:
+- _"Escúchame kiki, escribe: el protocolo TCP establece una conexión de tres vías"_ → la frase se descarta, solo se transcribe y refina "el protocolo TCP…"
+
+**Cancelación:** Presiona **Esc** en cualquier momento durante la grabación (ambos modos: hotkey y manos libres) para descartar la grabación.
+
+**Privacidad:**
+- Mientras el modo manos libres esté activo, el indicador de micrófono en la barra de estado muestra un punto **naranja permanente** (aviso de que el micrófono está monitoreando).
+- **Todo el audio se procesa en RAM y se descarta inmediatamente** — nunca se graba a disco.
+- Los segmentos de conversación que **no contienen la frase de activación** se descartan sin ser transcritos. Si un segmento supera 6 segundos y no activa la frase, su contenido **nunca se escribe al log**.
+- Solo se registran transcripts que contienen la frase de activación.
+
+**Consumo de recursos:**
+- **Whisper corre bajo demanda:** el modelo solo se invoca cuando hay habla cerca del Mac (VAD por análisis de energía filtra silencio y ruido ambiental muy bajo, reduciendo falsos positivos).
+- **openWakeWord (optimización futura):** modelo dedicado ~1 MB para detección de frase más eficiente — pendiente en backlog.
+
+**Limitaciones conocidas:**
+- **Ambientes muy ruidosos:** pueden disparar segmentos de grabación falsos si el umbral de RMS (energy threshold) se cruza. En v1 usamos un umbral fijo; umbral adaptativo está en backlog.
+- **"Listo" como palabra de cierre:** la spec lo menciona (§3) como forma alternativa de terminar dictado; **no implementado en v1** — en backlog junto con otras mejoras de UX.
+
+## Notas de alcance (Fase 2A-2B)
 
 **Fase 2A implementada:**
 - ✓ Refinado LLM local (Qwen2.5-3B-Instruct-4bit, ~1.8 GB)
@@ -85,9 +118,20 @@ Tras transcribir con Whisper, el texto se pasa a un modelo LLM local (Qwen2.5-3B
 - ✓ Degradación elegante (timeout 5s → Whisper crudo)
 - ✓ Modelo Whisper cuantizado (`openai_whisper-large-v3_turbo_954MB`) con prewarm
 
-**Pendiente (Fase 2B):**
-- Wake word (spec §2) — requerirá research de openWakeWord o entrenamiento custom; plan separado
-- Cancelación con Esc durante grabación (spec §3) — conecta junto con wake word en Fase 2B PARA AMBOS modos (hold-to-talk y wake)
+**Fase 2B implementada (v1 híbrida):**
+- ✓ Wake word (VAD + Whisper híbrido: detección por frase "escúchame kiki" / "listen to me kiki")
+- ✓ Toggle en menú + UserDefaults (default OFF)
+- ✓ Chime + HUD "👂 Te escucho…"
+- ✓ Dictado en el mismo aliento (frase se descarta)
+- ✓ Cancelación con Esc en ambos modos (hotkey y manos libres)
+- ✓ Indicador naranja de micrófono activo
+- ✓ Audio solo en RAM, segmentos sin frase no se loggean
+
+**Pendiente (optimizaciones 2B):**
+- openWakeWord (modelo dedicado ~1 MB) — alternativa más eficiente a VAD+Whisper
+- Umbral de energía adaptativo (v1 usa RMS fijo — env muy ruidosos pueden generar falsos segmentos)
+- "Listo" como palabra de cierre (spec §3 lo menciona; no va en v1)
+- Seam de audio testeable para WakeListener (mejorar cobertura de tests)
 
 **Pendiente (Fase 3):**
 - Diccionario custom de palabras (spec §9)
@@ -98,3 +142,4 @@ Tras transcribir con Whisper, el texto se pasa a un modelo LLM local (Qwen2.5-3B
 - **Decisión 2026-07-06 (Whisper):** la variante full-precision (3 GB) disparaba compilaciones ANE de 10-30 min en la primera inferencia (ANECompilerService al 95% CPU, app bloqueada en "Procesando…") y se re-pagaban tras cada rebuild por la firma ad-hoc. Con la cuantizada + prewarm, la compilación ocurre en la carga y la inferencia queda en segundos.
 - **Decisión 2026-07-06 (LLM + Metal):** Qwen2.5-3B con MLX requiere `xcodebuild` para compilar los shaders Metal en la carga; no es posible con CLT solo. La carga es ~10–20s en primer arranque (compilación + prewarm), las inferencias siguientes ~2-3s (medido: 2.2s de generación real con el modelo ya en caché, ver `.superpowers/sdd/task-2a4-report.md`).
 - **Decisión 2026-07-06 (latencia end-to-end vs spec Fase 1):** la latencia total de dictado con refinado (~3-4s: STT + generación LLM) excede el objetivo <2s del spec Fase 1. Decisión registrada: aceptado en Fase 2A (el refinado con IA es una mejora nueva, no parte del baseline original), tuning en Fase 3 (candidatos: modelo 1.5B, prompt más corto, streaming).
+- **Decisión 2026-07-06 (wake v1 híbrida):** VAD por energía + transcripción Whisper en segmentos detecta la frase con suficiente confiabilidad para v1. openWakeWord (modelo especializado) es más eficiente pero requiere investigación — en backlog como optimización.
