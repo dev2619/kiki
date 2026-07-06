@@ -32,8 +32,10 @@ KIKI_STT_TEST=1 swift test --filter WhisperTranscriberIntegrationTests
 Test de integración LLM (descarga Qwen2.5-3B; requiere xcodebuild, no swift test):
 
 ```bash
-KIKI_LLM_TEST=1 xcodebuild test -scheme kiki -destination 'platform=macOS' -only-testing:KikiRefineTests/LLMRefinerIntegrationTests
+TEST_RUNNER_KIKI_LLM_TEST=1 xcodebuild test -scheme kiki -destination 'platform=macOS' -only-testing:KikiRefineTests/LLMRefinerIntegrationTests
 ```
+
+(El prefijo `TEST_RUNNER_` es necesario: xcodebuild solo propaga al test runner las variables así prefijadas.)
 
 ## Permisos (primer arranque)
 
