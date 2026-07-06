@@ -44,10 +44,16 @@ public final class DictationController {
         }
         transition(to: .processing)
         do {
+            KikiLog.log("kiki core: transcribiendo \(samples.count) muestras (\(String(format: "%.1f", Double(samples.count) / 16_000))s de audio)")
+            let started = Date()
             let text = try await transcriber.transcribe(samples)
+            KikiLog.log("kiki core: transcripción lista en \(String(format: "%.2f", Date().timeIntervalSince(started)))s — \(text.count) chars")
             let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
             if !trimmed.isEmpty {
                 try inserter.insert(trimmed)
+                KikiLog.log("kiki core: texto insertado")
+            } else {
+                KikiLog.log("kiki core: transcripción vacía, nada que insertar")
             }
             transition(to: .idle)
         } catch let error as DictationError {
@@ -67,6 +73,7 @@ public final class DictationController {
 
     private func transition(to newState: DictationState) {
         state = newState
+        KikiLog.log("kiki estado: \(newState)")
         delegate?.dictationStateDidChange(newState)
     }
 }

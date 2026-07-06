@@ -65,7 +65,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 try await self.transcriber.prepare()
                 await MainActor.run { self.markReady() }
             } catch {
-                NSLog("kiki: error cargando modelo: \(error)")
+                KikiLog.log("kiki: error cargando modelo: \(error)")
                 await MainActor.run {
                     self.statusItem.menu?.item(withTag: 1)?.title = "Error cargando modelo"
                 }
@@ -81,12 +81,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
 extension AppDelegate: DictationControllerDelegate {
     func dictationStateDidChange(_ state: DictationState) {
-        NSLog("kiki estado: \(state)")
         hud.show(state: state)
     }
 
     func dictationDidFail(_ error: DictationError) {
-        NSLog("kiki error: \(String(describing: error))")
+        KikiLog.log("kiki error: \(String(describing: error))")
         hud.show(state: .idle)
     }
 }

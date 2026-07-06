@@ -18,12 +18,14 @@ public final class WhisperTranscriber: Transcribing {
 
     /// Carga (y si hace falta descarga) el modelo. Llamar una vez al arrancar.
     public func prepare() async throws {
+        let started = Date()
         do {
             whisperKit = try await WhisperKit(WhisperKitConfig(model: Self.preferredModel))
-            NSLog("kiki stt: modelo cargado (\(Self.preferredModel))")
+            KikiLog.log("kiki stt: modelo cargado (\(Self.preferredModel)) en \(String(format: "%.1f", Date().timeIntervalSince(started)))s")
         } catch {
-            NSLog("kiki stt: \(Self.preferredModel) no disponible (\(error)); usando modelo recomendado")
+            KikiLog.log("kiki stt: \(Self.preferredModel) no disponible (\(error)); usando modelo recomendado")
             whisperKit = try await WhisperKit()
+            KikiLog.log("kiki stt: modelo recomendado cargado en \(String(format: "%.1f", Date().timeIntervalSince(started)))s")
         }
         isReady = true
     }
@@ -35,7 +37,10 @@ public final class WhisperTranscriber: Transcribing {
         var options = DecodingOptions()
         options.task = .transcribe
         options.detectLanguage = true // ES/EN auto (spec §6)
+        KikiLog.log("kiki stt: inferencia iniciada (\(samples.count) muestras) — la primera tras arrancar puede tardar por compilación ANE/CoreML")
+        let started = Date()
         let results = try await whisperKit.transcribe(audioArray: samples, decodeOptions: options)
+        KikiLog.log("kiki stt: inferencia completada en \(String(format: "%.1f", Date().timeIntervalSince(started)))s")
         return results.map(\.text).joined(separator: " ")
     }
 }
