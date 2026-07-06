@@ -52,4 +52,13 @@ final class AudioResamplerTests: XCTestCase {
     func test_rmsOfEmptyIsZero() {
         XCTAssertEqual(AudioResampler.rms([]), 0)
     }
+
+    func test_resampleOfEmptyBufferReturnsEmpty() {
+        let format = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32, sampleRate: 48_000, channels: 2, interleaved: false)!
+        let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 16)!
+        buffer.frameLength = 0
+        let samples = AudioResampler.resampleTo16kMono(buffer)
+        XCTAssertTrue(samples.isEmpty)
+    }
 }

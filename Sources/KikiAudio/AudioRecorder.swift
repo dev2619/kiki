@@ -8,7 +8,7 @@ public final class AudioRecorder: AudioRecording {
     private let collectQueue = DispatchQueue(label: "com.dev2619.kiki.audio-collect")
     private var collected: [Float] = []
 
-    /// Nivel RMS por chunk, para animar el HUD. Se invoca en un hilo de audio.
+    /// Nivel RMS por chunk, para animar el HUD. Se invoca en un hilo de audio en tiempo real — no bloquear.
     public var onLevel: ((Float) -> Void)?
 
     public init() {}
