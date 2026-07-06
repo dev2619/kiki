@@ -296,6 +296,28 @@ final class DictationControllerTests: XCTestCase {
         XCTAssertEqual(controller.state, .idle)
     }
 
+    func test_suspiciouslyLongRefinerOutputFallsBackToRawText() async {
+        let refiner = MockRefiner()
+        // trimmedRefined.count > text.count * 2 + 40 must trigger the guard.
+        // "crudo" has 5 chars, so the threshold is 5*2+40 = 50; return
+        // something comfortably past that (way more than 2x+40) to simulate
+        // a runaway/prompt-injected generation.
+        refiner.textToReturn = String(repeating: "x", count: 500)
+        let context = MockContext()
+        controller = DictationController(
+            recorder: recorder, transcriber: transcriber, inserter: inserter,
+            refiner: refiner, context: context)
+        controller.delegate = delegate
+
+        transcriber.textToReturn = "crudo"
+        controller.hotkeyPressed()
+        await controller.hotkeyReleased()
+
+        XCTAssertEqual(inserter.inserted, ["crudo"])
+        XCTAssertEqual(controller.state, .idle)
+        XCTAssertTrue(delegate.errors.isEmpty)
+    }
+
     func test_withoutRefinerBehavesAsPhase1() async {
         controller.hotkeyPressed()
         await controller.hotkeyReleased()

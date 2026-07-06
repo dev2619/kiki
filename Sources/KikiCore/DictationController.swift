@@ -116,6 +116,16 @@ public final class DictationController {
                 KikiLog.log("kiki core: refinado vacío — uso texto crudo")
                 return text
             }
+            // Guardia de robustez: un LLM que devuelve muchísimo más texto
+            // del que se le pidió reescribir es señal de un prompt injection
+            // (el texto dictado contenía instrucciones que el modelo obedeció
+            // en vez de solo limpiar) o de una generación descarrilada. En
+            // cualquier caso, insertar eso sería peor que insertar el texto
+            // crudo de Whisper.
+            guard trimmedRefined.count <= text.count * 2 + 40 else {
+                KikiLog.log("kiki core: refinado sospechosamente largo — uso texto crudo")
+                return text
+            }
             KikiLog.log("kiki core: refinado (\(profile.rawValue)) en \(String(format: "%.2f", Date().timeIntervalSince(started)))s")
             return trimmedRefined
         } catch {
