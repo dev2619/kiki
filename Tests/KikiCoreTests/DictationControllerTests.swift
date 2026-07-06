@@ -318,6 +318,29 @@ final class DictationControllerTests: XCTestCase {
         XCTAssertTrue(delegate.errors.isEmpty)
     }
 
+    func test_suspiciouslyShortRefinerOutputFallsBackToRawText() async {
+        let refiner = MockRefiner()
+        // trimmedRefined.count < text.count / 3 must trigger the guard.
+        // A 60-char raw input has threshold 60/3 = 20; "ok." (3 chars) is
+        // far below that, simulating a degenerate reply (e.g. the LLM
+        // answered the dictation instead of rewriting it).
+        let raw = String(repeating: "a", count: 60)
+        refiner.textToReturn = "ok."
+        let context = MockContext()
+        controller = DictationController(
+            recorder: recorder, transcriber: transcriber, inserter: inserter,
+            refiner: refiner, context: context)
+        controller.delegate = delegate
+
+        transcriber.textToReturn = raw
+        controller.hotkeyPressed()
+        await controller.hotkeyReleased()
+
+        XCTAssertEqual(inserter.inserted, [raw])
+        XCTAssertEqual(controller.state, .idle)
+        XCTAssertTrue(delegate.errors.isEmpty)
+    }
+
     func test_withoutRefinerBehavesAsPhase1() async {
         controller.hotkeyPressed()
         await controller.hotkeyReleased()

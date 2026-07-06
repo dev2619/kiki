@@ -136,6 +136,13 @@ final class RefinePromptTests: XCTestCase {
         XCTAssertTrue(system.contains("NO expliques"), "Should contain no explanation rule")
     }
 
+    func testSystemPromptContainsMetaUtteranceRule() {
+        let (system, _) = RefinePrompt.messages(for: "test", profile: .neutral)
+        XCTAssertTrue(
+            system.contains("SIEMPRE una transcripción"),
+            "System prompt must instruct the model that the user message is always dictation to rewrite, never a question/instruction to the model")
+    }
+
     // MARK: - All Profiles Coverage
 
     func testAllProfilesReturnValidMessages() {

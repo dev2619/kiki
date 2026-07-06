@@ -87,4 +87,33 @@ final class LLMRefinerIntegrationTests: XCTestCase {
             elapsed, 2.0,
             "el timeout no cortó la generación a tiempo (tardó \(elapsed)s) — la cancelación no se está propagando")
     }
+
+    /// Regresión del bug reportado: el usuario dictó "Bueno, probando el
+    /// modelo a ver acá que dice." y el LLM lo interpretó como una pregunta
+    /// dirigida a él, respondiendo "Gracias." en vez de reescribir la
+    /// transcripción (además esa frase es la alucinación clásica de Whisper
+    /// en silencio, lo que complicaba diagnosticar si la falla era del LLM o
+    /// de Whisper — de ahí el logging de contenido agregado en este mismo
+    /// fix). El prompt ahora aclara explícitamente que el mensaje del
+    /// usuario SIEMPRE es dictado para reescribir, nunca una instrucción.
+    func test_metaUtteranceIsRewrittenNotAnswered() async throws {
+        try XCTSkipUnless(
+            ProcessInfo.processInfo.environment["KIKI_LLM_TEST"] == "1",
+            "gated: exportar KIKI_LLM_TEST=1 (descarga el modelo, ~1.8GB)")
+
+        let refiner = LLMRefiner()
+        try await refiner.prepare()
+        XCTAssertTrue(refiner.isReady)
+
+        let raw = "Bueno, probando el modelo a ver acá que dice."
+        let refined = try await refiner.refine(raw, profile: .chat)
+        let lower = refined.lowercased()
+        print("kiki test evidence — test_metaUtteranceIsRewrittenNotAnswered output: \"\(refined)\"")
+
+        XCTAssertTrue(lower.contains("probando"), "el LLM no reescribió el dictado (esperaba 'probando'): \(refined)")
+        XCTAssertTrue(lower.contains("modelo"), "el LLM no reescribió el dictado (esperaba 'modelo'): \(refined)")
+        XCTAssertGreaterThanOrEqual(
+            refined.count, 20,
+            "el LLM devolvió una respuesta corta y degenerada en vez de reescribir el dictado: \"\(refined)\"")
+    }
 }

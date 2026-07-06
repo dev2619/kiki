@@ -105,7 +105,13 @@ public final class LLMRefiner: Refining {
             // cancelación tarda en propagarse (ver nota de clase arriba).
             let promptTokenCount = input.text.tokens.size
             let maxTokens = min(512, promptTokenCount * 2 + 64)
-            let parameters = GenerateParameters(maxTokens: maxTokens, temperature: 0.3)
+            // temperature: 0 → decodificación greedy (determinística). El
+            // refinado es una tarea de reescritura fiel al texto dictado, no
+            // de generación creativa: queremos que el modelo elija siempre
+            // el token más probable en vez de muestrear, lo que además
+            // reduce la varianza entre corridas (de-flakea los tests
+            // gated de este archivo).
+            let parameters = GenerateParameters(maxTokens: maxTokens, temperature: 0)
 
             let iterator = try TokenIterator(
                 input: input, model: context.model, parameters: parameters)
