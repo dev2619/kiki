@@ -14,6 +14,7 @@ bundle: build
 	rm -rf $(APP)
 	mkdir -p $(APP)/Contents/MacOS $(APP)/Contents/Resources
 	cp App/Info.plist $(APP)/Contents/Info.plist
+	cp App/AppIcon.icns $(APP)/Contents/Resources/AppIcon.icns
 	cp $(BIN) $(APP)/Contents/MacOS/Kiki
 	# Bundles de recursos de dependencias SPM (si existen)
 	-cp -R .build/release/*.bundle $(APP)/Contents/Resources/ 2>/dev/null
