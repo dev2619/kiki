@@ -32,7 +32,8 @@ final class WhisperTranscriberIntegrationTests: XCTestCase {
 
         let transcriber = WhisperTranscriber()
         try await transcriber.prepare()
-        XCTAssertTrue(transcriber.isReady)
+        let ready = await transcriber.isReady
+        XCTAssertTrue(ready)
 
         let text = try await transcriber.transcribe(samples)
         let normalized = text.lowercased()
