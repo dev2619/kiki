@@ -50,6 +50,13 @@ public final class WakeListener: @unchecked Sendable {
     private static let disarmTimeoutSeconds: TimeInterval = 8
     private static let tapBufferSize: AVAudioFrameCount = 4_096
     private static let sampleRate: Double = 16_000
+    /// Ventana tras armar durante la cual se ignora el audio entrante: el
+    /// chime "Glass" reproducido en `wakeListenerDidArm` (delegate, dispara
+    /// en el MainActor apenas se detecta la frase) tarda en sonar y su propio
+    /// audio puede colarse por el micrófono del Mac, disparando un
+    /// `speechStarted` falso en el segmenter o mezclándose con el arranque
+    /// real del dictado capturado.
+    private static let postArmSuppression: TimeInterval = 0.5
 
     /// Backing store de `state`, confinado a `queue`. El código interno que ya
     /// corre sobre `queue` DEBE leer/escribir `_state` directamente — nunca el
@@ -81,6 +88,16 @@ public final class WakeListener: @unchecked Sendable {
     /// un cancel() disparado casi al mismo tiempo (p.ej. por speechStarted).
     private var disarmGeneration = 0
 
+    /// Contador acumulado de muestras entregadas por el tap desde `start()`,
+    /// usado para medir la ventana de `postArmSuppression` sin depender de
+    /// timers de wall-clock (consistente con que todo lo demás en esta clase
+    /// avanza por eventos del propio tap). Confinado a `queue` como el resto.
+    private var accumulatedSampleCount = 0
+    /// Umbral de `accumulatedSampleCount` a partir del cual deja de
+    /// suprimirse el audio entrante tras armar; `nil` cuando no aplica
+    /// supresión (no armado, o ventana ya consumida).
+    private var suppressUntilSampleCount: Int?
+
     public init(transcriber: Transcribing) {
         self.transcriber = transcriber
     }
@@ -96,6 +113,8 @@ public final class WakeListener: @unchecked Sendable {
             session += 1
             segmenter = SpeechSegmenter(config: Self.listeningConfig)
             isTranscribing = false
+            accumulatedSampleCount = 0
+            suppressUntilSampleCount = nil
             let input = engine.inputNode
             let format = input.outputFormat(forBus: 0)
             input.installTap(onBus: 0, bufferSize: Self.tapBufferSize, format: format) { [weak self] buffer, _ in
@@ -142,6 +161,7 @@ public final class WakeListener: @unchecked Sendable {
             // que el buffer circular interno se rellene de nuevo.
             segmenter = SpeechSegmenter(config: Self.listeningConfig)
             _state = .listening
+            suppressUntilSampleCount = nil
             KikiLog.log("kiki wake: captura cancelada, vuelvo a listening")
             notify { $0.wakeListenerDidDisarm() }
         }
@@ -152,6 +172,17 @@ public final class WakeListener: @unchecked Sendable {
     private func handle(chunk: [Float], rms: Float) {
         dispatchPrecondition(condition: .onQueue(queue))
         guard _state != .stopped else { return }
+        accumulatedSampleCount += chunk.count
+        if _state == .armed, let suppressUntil = suppressUntilSampleCount {
+            guard accumulatedSampleCount >= suppressUntil else {
+                // Dentro de la ventana postArmSuppression: se descarta el
+                // chunk sin alimentar el segmenter, para que el chime no
+                // pueda disparar un speechStarted falso ni colarse al inicio
+                // del dictado capturado.
+                return
+            }
+            suppressUntilSampleCount = nil
+        }
         switch segmenter.process(chunk: chunk, rms: rms) {
         case .none:
             break
@@ -189,6 +220,7 @@ public final class WakeListener: @unchecked Sendable {
             // potencialmente perdido mientras el nuevo segmenter se rellena).
             segmenter = SpeechSegmenter(config: Self.listeningConfig)
             _state = .listening
+            suppressUntilSampleCount = nil
             KikiLog.log("kiki wake: captura completa (\(samples.count) muestras), vuelvo a listening")
             notify { $0.wakeListenerDidCapture(samples: samples) }
         case .stopped:
@@ -257,6 +289,9 @@ public final class WakeListener: @unchecked Sendable {
         dispatchPrecondition(condition: .onQueue(queue))
         _state = .armed
         segmenter = SpeechSegmenter(config: Self.armedConfig)
+        // Ver doc de postArmSuppression: el chime que dispara wakeListenerDidArm
+        // (más abajo) no debe colarse en el segmenter recién armado.
+        suppressUntilSampleCount = accumulatedSampleCount + Int(Self.postArmSuppression * Self.sampleRate)
         KikiLog.log("kiki wake: armado")
         notify { $0.wakeListenerDidArm() }
         scheduleDisarmTimeout()
@@ -293,6 +328,7 @@ public final class WakeListener: @unchecked Sendable {
         disarmTask = nil
         segmenter = SpeechSegmenter(config: Self.listeningConfig)
         _state = .listening
+        suppressUntilSampleCount = nil
         KikiLog.log("kiki wake: timeout sin dictado, vuelvo a listening")
         notify { $0.wakeListenerDidDisarm() }
     }
