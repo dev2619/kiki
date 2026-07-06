@@ -33,7 +33,7 @@ import MLXLMCommon
 /// que `WhisperTranscriber`).
 ///
 /// Nota de dependencias: se usa `mlx-swift-examples` (Libraries/MLXLLM +
-/// MLXLMCommon) resuelto en 2.25.7 contra `mlx-swift` 0.25.6. La API de alto
+/// MLXLMCommon) resuelto en 2.25.9 contra `mlx-swift` 0.25.6. La API de alto
 /// nivel `ChatSession` (Libraries/MLXLMCommon/Streamlined.swift) reemplaza al
 /// patrón de más bajo nivel (`context.processor.prepare` + `TokenIterator` +
 /// `MLXLMCommon.generate` manual) que aparece en el sketch original de la

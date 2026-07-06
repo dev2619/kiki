@@ -1,7 +1,9 @@
 import AppKit
 import KikiAudio
+import KikiContext
 import KikiCore
 import KikiInsert
+import KikiRefine
 import KikiSTT
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
@@ -9,6 +11,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private(set) var controller: DictationController!
     let recorder = AudioRecorder()
     let transcriber = WhisperTranscriber()
+    let refiner = LLMRefiner()
+    let appContext = FrontmostAppContext()
     private var hotkey: HotkeyMonitor!
     private var hud: HUDController!
 
@@ -19,7 +23,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         controller = DictationController(
             recorder: recorder,
             transcriber: transcriber,
-            inserter: PasteInserter())
+            inserter: PasteInserter(),
+            refiner: refiner,
+            context: appContext)
         controller.delegate = self
 
         hud = HUDController()
@@ -47,7 +53,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem.button?.appearsDisabled = true // hasta que cargue el modelo
 
         let menu = NSMenu()
-        let status = NSMenuItem(title: "Cargando modelo…", action: nil, keyEquivalent: "")
+        let status = NSMenuItem(title: "Cargando modelos…", action: nil, keyEquivalent: "")
         status.isEnabled = false
         status.tag = 1
         menu.addItem(status)
@@ -60,22 +66,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func loadModelInBackground() {
+        // Un solo Task (hereda MainActor) para que la carga de Whisper y la
+        // del LLM queden serializadas — evita llamadas concurrentes a
+        // prepare() en ambos modelos.
         Task {
             do {
                 try await self.transcriber.prepare()
-                await MainActor.run { self.markReady() }
             } catch {
-                KikiLog.log("kiki: error cargando modelo: \(error)")
+                KikiLog.log("kiki: error cargando modelo de transcripción: \(error)")
                 await MainActor.run {
                     self.statusItem.menu?.item(withTag: 1)?.title = "Error cargando modelo"
                 }
+                return
+            }
+
+            do {
+                try await self.refiner.prepare()
+                await MainActor.run { self.markReady() }
+            } catch {
+                KikiLog.log("kiki: error cargando modelo de refinado LLM: \(error)")
+                await MainActor.run { self.markReady(refinementAvailable: false) }
             }
         }
     }
 
-    private func markReady() {
+    private func markReady(refinementAvailable: Bool = true) {
         statusItem.button?.appearsDisabled = false
-        statusItem.menu?.item(withTag: 1)?.title = "Listo — mantén Fn para dictar"
+        statusItem.menu?.item(withTag: 1)?.title = refinementAvailable
+            ? "Listo — mantén Fn para dictar"
+            : "Listo (sin refinado IA)"
     }
 }
 

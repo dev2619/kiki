@@ -13,7 +13,6 @@ import KikiCore
 //     -only-testing:KikiRefineTests/LLMRefinerIntegrationTests
 //
 /// Test de integración real (modelo Qwen2.5-3B-Instruct-4bit vía MLX).
-/// Se corre solo con: KIKI_LLM_TEST=1 swift test --filter LLMRefinerIntegrationTests
 final class LLMRefinerIntegrationTests: XCTestCase {
     func test_refinesSpanishDictation() async throws {
         try XCTSkipUnless(
