@@ -22,15 +22,18 @@ public protocol WakeListenerDelegate: AnyObject {
 /// segmento y arma una ventana de dictado con timeout cuando la encuentra.
 ///
 /// ## Disciplina de concurrencia
-/// Todo el estado mutable (`state`, `segmenter`, la tarea de transcripción en
-/// vuelo, la tarea de timeout de desarmado) está confinado a `queue`, una
-/// cola serial que es también la cola en la que se despachan los callbacks
-/// del tap de audio. `SpeechSegmenter` no es thread-safe, así que mantenerlo
-/// en una única cola serial evita cualquier acceso concurrente sin necesitar
-/// locks. Los métodos públicos (`start`/`stop`/`cancelCapture`) despachan de
-/// forma síncrona sobre `queue` para que el caller observe el efecto (o el
-/// throw de `start()`) antes de retornar. Los eventos hacia el delegate —que
-/// es `@MainActor`— saltan siempre con `Task { @MainActor in ... }`.
+/// Todo el estado mutable (`_state`, `segmenter`, la tarea de transcripción en
+/// vuelo, la tarea de timeout de desarmado, `session`, `disarmGeneration`)
+/// está confinado a `queue`, una cola serial que es también la cola en la que
+/// se despachan los callbacks del tap de audio. `SpeechSegmenter` no es
+/// thread-safe, así que mantenerlo en una única cola serial evita cualquier
+/// acceso concurrente sin necesitar locks. Los métodos públicos
+/// (`start`/`stop`/`cancelCapture`) despachan de forma síncrona sobre `queue`
+/// para que el caller observe el efecto (o el throw de `start()`) antes de
+/// retornar. El accessor público `state` también usa `queue.sync`, por lo que
+/// el código interno que ya corre sobre `queue` debe usar `_state` para
+/// evitar deadlock por reentrancia. Los eventos hacia el delegate —que es
+/// `@MainActor`— saltan siempre con `Task { @MainActor in ... }`.
 /// `@unchecked Sendable`: todo el estado mutable está confinado a `queue`
 /// (ver disciplina de concurrencia arriba); no hay acceso concurrente real,
 /// solo lo que el checker no puede probar automáticamente por sí solo.
@@ -48,7 +51,12 @@ public final class WakeListener: @unchecked Sendable {
     private static let tapBufferSize: AVAudioFrameCount = 4_096
     private static let sampleRate: Double = 16_000
 
-    public private(set) var state: State = .stopped
+    /// Backing store de `state`, confinado a `queue`. El código interno que ya
+    /// corre sobre `queue` DEBE leer/escribir `_state` directamente — nunca el
+    /// accessor público `state`, que hace `queue.sync` y produciría deadlock
+    /// por reentrancia si se llamara desde dentro de la propia cola.
+    private var _state: State = .stopped
+    public var state: State { queue.sync { _state } }
     public weak var delegate: WakeListenerDelegate?
 
     private let transcriber: Transcribing
@@ -60,7 +68,18 @@ public final class WakeListener: @unchecked Sendable {
     /// Solo una transcripción en vuelo a la vez; segmentos que llegan mientras
     /// hay una pendiente se descartan (ver `handleListeningSegment`).
     private var isTranscribing = false
+    private var transcriptionTask: Task<Void, Never>?
     private var disarmTask: Task<Void, Never>?
+    /// Incrementado en cada start()/stop(). Las tareas de transcripción en
+    /// vuelo capturan el valor vigente al lanzarse; si al completar el valor
+    /// ya no coincide (hubo un stop()+start() de por medio), el resultado se
+    /// descarta aunque el `state` haya vuelto a `.listening` por casualidad.
+    private var session = 0
+    /// Incrementado cada vez que se programa o cancela el timeout de
+    /// desarmado. Un `fireDisarmTimeout` solo actúa si su generación capturada
+    /// sigue vigente, evitando la carrera entre la expiración natural de 8s y
+    /// un cancel() disparado casi al mismo tiempo (p.ej. por speechStarted).
+    private var disarmGeneration = 0
 
     public init(transcriber: Transcribing) {
         self.transcriber = transcriber
@@ -70,7 +89,11 @@ public final class WakeListener: @unchecked Sendable {
 
     public func start() throws {
         try queue.sync {
-            guard state == .stopped else { return }
+            guard _state == .stopped else {
+                KikiLog.log("kiki wake: start() ignorado, ya activo (state=\(_state))")
+                return
+            }
+            session += 1
             segmenter = SpeechSegmenter(config: Self.listeningConfig)
             isTranscribing = false
             let input = engine.inputNode
@@ -88,32 +111,37 @@ public final class WakeListener: @unchecked Sendable {
                 input.removeTap(onBus: 0)
                 throw error
             }
-            state = .listening
+            _state = .listening
             KikiLog.log("kiki wake: listening iniciado")
         }
     }
 
     public func stop() {
         queue.sync {
-            guard state != .stopped else { return }
+            guard _state != .stopped else { return }
             engine.inputNode.removeTap(onBus: 0)
             engine.stop()
-            disarmTask?.cancel()
-            disarmTask = nil
+            cancelDisarmTimeout()
+            transcriptionTask?.cancel()
+            transcriptionTask = nil
             isTranscribing = false
+            session += 1
             segmenter.reset()
-            state = .stopped
+            _state = .stopped
             KikiLog.log("kiki wake: detenido")
         }
     }
 
     public func cancelCapture() {
         queue.sync {
-            guard state == .armed else { return }
-            disarmTask?.cancel()
-            disarmTask = nil
+            guard _state == .armed else { return }
+            cancelDisarmTimeout()
+            // Vuelta a listening tras cancelar: el segmenter nuevo arranca sin
+            // el pre-roll que tenía el anterior, así que hay una ventana de
+            // ~0.3s donde el primer audio entrante puede perderse antes de
+            // que el buffer circular interno se rellene de nuevo.
             segmenter = SpeechSegmenter(config: Self.listeningConfig)
-            state = .listening
+            _state = .listening
             KikiLog.log("kiki wake: captura cancelada, vuelvo a listening")
             notify { $0.wakeListenerDidDisarm() }
         }
@@ -123,7 +151,7 @@ public final class WakeListener: @unchecked Sendable {
 
     private func handle(chunk: [Float], rms: Float) {
         dispatchPrecondition(condition: .onQueue(queue))
-        guard state != .stopped else { return }
+        guard _state != .stopped else { return }
         switch segmenter.process(chunk: chunk, rms: rms) {
         case .none:
             break
@@ -138,28 +166,29 @@ public final class WakeListener: @unchecked Sendable {
             // timeout de desarmado ya fue cancelado en handleSpeechStarted.
             // Sin reprogramarlo aquí, el listener quedaría armado
             // indefinidamente sin ninguna vía de salida salvo cancelCapture().
-            if state == .armed {
+            if _state == .armed {
                 scheduleDisarmTimeout()
             }
         }
     }
 
     private func handleSpeechStarted() {
-        guard state == .armed else { return }
-        disarmTask?.cancel()
-        disarmTask = nil
+        guard _state == .armed else { return }
+        cancelDisarmTimeout()
         notify { $0.wakeListenerDidStartCapture() }
     }
 
     private func handleSegmentEnded(_ samples: [Float]) {
-        switch state {
+        switch _state {
         case .listening:
             handleListeningSegment(samples)
         case .armed:
-            disarmTask?.cancel()
-            disarmTask = nil
+            cancelDisarmTimeout()
+            // Vuelta a listening tras una captura completa: mismo trade-off
+            // de pre-roll que en cancelCapture() (~0.3s de audio inicial
+            // potencialmente perdido mientras el nuevo segmenter se rellena).
             segmenter = SpeechSegmenter(config: Self.listeningConfig)
-            state = .listening
+            _state = .listening
             KikiLog.log("kiki wake: captura completa (\(samples.count) muestras), vuelvo a listening")
             notify { $0.wakeListenerDidCapture(samples: samples) }
         case .stopped:
@@ -175,7 +204,11 @@ public final class WakeListener: @unchecked Sendable {
         }
         isTranscribing = true
         let transcriber = self.transcriber
-        Task {
+        // Fence de sesión: si hay un stop()+start() mientras esta tarea está
+        // en vuelo, `session` cambia y el resultado se descarta al volver,
+        // aunque `state` haya vuelto a `.listening` por el nuevo start().
+        let capturedSession = session
+        transcriptionTask = Task {
             let text: String?
             do {
                 text = try await transcriber.transcribe(samples)
@@ -184,9 +217,11 @@ public final class WakeListener: @unchecked Sendable {
                 text = nil
             }
             self.queue.async {
+                // Reset incondicional: cubre el path feliz, el throw de
+                // transcribe() y el caso stale rechazado por el guard de abajo.
                 self.isTranscribing = false
-                // El estado pudo cambiar (stop) mientras transcribíamos.
-                guard self.state == .listening, let text else { return }
+                self.transcriptionTask = nil
+                guard capturedSession == self.session, self._state == .listening, let text else { return }
                 self.applyMatch(text, sampleCount: samples.count)
             }
         }
@@ -212,29 +247,44 @@ public final class WakeListener: @unchecked Sendable {
 
     private func arm() {
         dispatchPrecondition(condition: .onQueue(queue))
-        state = .armed
+        _state = .armed
         segmenter = SpeechSegmenter(config: Self.armedConfig)
         KikiLog.log("kiki wake: armado")
         notify { $0.wakeListenerDidArm() }
         scheduleDisarmTimeout()
     }
 
+    /// Cancela el timeout de desarmado en vuelo (si hay uno) y avanza la
+    /// generación, invalidando cualquier `fireDisarmTimeout` ya en camino
+    /// aunque su `Task.cancel()` no alcance a observarse a tiempo.
+    private func cancelDisarmTimeout() {
+        dispatchPrecondition(condition: .onQueue(queue))
+        disarmTask?.cancel()
+        disarmTask = nil
+        disarmGeneration += 1
+    }
+
     private func scheduleDisarmTimeout() {
         dispatchPrecondition(condition: .onQueue(queue))
         disarmTask?.cancel()
+        disarmGeneration += 1
+        let generation = disarmGeneration
         disarmTask = Task {
             try? await Task.sleep(nanoseconds: UInt64(Self.disarmTimeoutSeconds * 1_000_000_000))
             guard !Task.isCancelled else { return }
-            self.queue.async { self.fireDisarmTimeout() }
+            self.queue.async { self.fireDisarmTimeout(generation: generation) }
         }
     }
 
-    private func fireDisarmTimeout() {
+    private func fireDisarmTimeout(generation: Int) {
         dispatchPrecondition(condition: .onQueue(queue))
-        guard state == .armed else { return }
+        // Guarda de generación: una expiración natural de 8s puede llegar a
+        // ejecutarse casi al mismo tiempo que un cancel() (p.ej. disparado por
+        // speechStarted); si la generación ya avanzó, este disparo es stale.
+        guard generation == disarmGeneration, _state == .armed else { return }
         disarmTask = nil
         segmenter = SpeechSegmenter(config: Self.listeningConfig)
-        state = .listening
+        _state = .listening
         KikiLog.log("kiki wake: timeout sin dictado, vuelvo a listening")
         notify { $0.wakeListenerDidDisarm() }
     }
