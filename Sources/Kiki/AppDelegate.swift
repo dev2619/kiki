@@ -111,6 +111,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if wakeEnabled {
             wakeListener.stop()
             hud.showArmed(false)
+            // Si el toggle se apaga a mitad de una captura manos-libres (HUD
+            // mostrando "Escuchando…" desde wakeListenerDidStartCapture), el
+            // stop() de arriba no limpia ese estado — sin esto la pill queda
+            // pegada en pantalla aunque el dictado por hotkey siga funcionando.
+            if controller.state == .idle { hud.show(state: .idle) }
             wakePausedByDictation = false
             wakeEnabled = false
             UserDefaults.standard.set(false, forKey: Self.wakeEnabledKey)
@@ -120,18 +125,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 wakeEnabled = true
                 UserDefaults.standard.set(true, forKey: Self.wakeEnabledKey)
             } catch {
-                KikiLog.log("kiki wake: error al activar manos libres: \(error)")
+                wakeStartFailed(error, context: "al activar manos libres")
                 let alert = NSAlert()
                 alert.messageText = "No se pudo activar el modo manos libres"
                 alert.informativeText = String(describing: error)
                 alert.alertStyle = .warning
                 alert.runModal()
-                // revert: dejar el toggle apagado tal como estaba.
-                wakeEnabled = false
-                UserDefaults.standard.set(false, forKey: Self.wakeEnabledKey)
             }
         }
         statusItem.menu?.item(withTag: Self.wakeMenuItemTag)?.state = wakeEnabled ? .on : .off
+        updateStatusIcon()
+    }
+
+    /// Centraliza la reacción a un `start()` que falla, tanto en el toggle
+    /// manual como en los arranques automáticos (launch/resume): sin esto,
+    /// un fallo silencioso dejaba `wakeEnabled=true` y el checkmark del menú
+    /// en "on" mientras el micrófono manos-libres estaba realmente muerto
+    /// (desync ON/dead-mic indetectable para el usuario).
+    @MainActor private func wakeStartFailed(_ error: Error, context: String) {
+        KikiLog.log("kiki wake: error \(context): \(error)")
+        wakeEnabled = false
+        UserDefaults.standard.set(false, forKey: Self.wakeEnabledKey)
+        statusItem.menu?.item(withTag: Self.wakeMenuItemTag)?.state = .off
         updateStatusIcon()
     }
 
@@ -160,7 +175,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    private func markReady(refinementAvailable: Bool = true) {
+    @MainActor private func markReady(refinementAvailable: Bool = true) {
         statusItem.button?.appearsDisabled = false
         statusItem.menu?.item(withTag: 1)?.title = refinementAvailable
             ? "Listo — mantén Fn para dictar"
@@ -174,7 +189,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             do {
                 try wakeListener.start()
             } catch {
-                KikiLog.log("kiki wake: error al iniciar manos libres en el arranque: \(error)")
+                wakeStartFailed(error, context: "al iniciar manos libres en el arranque")
             }
         }
     }
@@ -193,7 +208,11 @@ extension AppDelegate: DictationControllerDelegate {
             hud.showArmed(false)
             wakePausedByDictation = true
         } else if state == .idle && wakePausedByDictation && wakeEnabled {
-            try? wakeListener.start()
+            do {
+                try wakeListener.start()
+            } catch {
+                wakeStartFailed(error, context: "al reanudar manos libres tras dictado")
+            }
             wakePausedByDictation = false
         }
     }
@@ -216,7 +235,10 @@ extension AppDelegate: WakeListenerDelegate {
     }
 
     func wakeListenerDidCapture(samples: [Float]) {
-        hud.show(state: .idle)
+        // No hud.show(state: .idle) aquí: controller.process() dispara
+        // dictationStateDidChange(.processing) casi de inmediato vía su
+        // delegate, así que un orderOut(.idle) intermedio solo producía un
+        // flicker visible de la pill entre "Escuchando…" y "Procesando…".
         Task { await controller.process(samples: samples) }
     }
 
@@ -226,5 +248,10 @@ extension AppDelegate: WakeListenerDelegate {
 
     func wakeListenerDidDisarm() {
         hud.showArmed(false)
+        // Ver comentario equivalente en toggleWake: cubre el caso en que el
+        // desarmado llega mientras la captura ya estaba en curso (p.ej.
+        // segmentDiscarded con el listener armado) y la pill de "Escuchando…"
+        // quedó pegada en pantalla sin que ningún otro camino la limpie.
+        if controller.state == .idle { hud.show(state: .idle) }
     }
 }
