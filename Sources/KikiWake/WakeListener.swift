@@ -217,11 +217,19 @@ public final class WakeListener: @unchecked Sendable {
                 text = nil
             }
             self.queue.async {
-                // Reset incondicional: cubre el path feliz, el throw de
-                // transcribe() y el caso stale rechazado por el guard de abajo.
+                // Solo la sesión vigente puede tocar isTranscribing /
+                // transcriptionTask: una completion stale (sesión vieja) NO
+                // debe resetear nada — el stop() que la invalidó ya hizo la
+                // limpieza, y estos campos pueden pertenecer ahora a una
+                // transcripción de la sesión nueva todavía en vuelo
+                // (clobberearlos permitiría dos transcripciones concurrentes
+                // y dejaría esa tarea sin handle cancelable). Dentro de la
+                // sesión vigente el reset sí es incondicional: cubre el path
+                // feliz y el throw de transcribe().
+                guard capturedSession == self.session else { return }
                 self.isTranscribing = false
                 self.transcriptionTask = nil
-                guard capturedSession == self.session, self._state == .listening, let text else { return }
+                guard self._state == .listening, let text else { return }
                 self.applyMatch(text, sampleCount: samples.count)
             }
         }
