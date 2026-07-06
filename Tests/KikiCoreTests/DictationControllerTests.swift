@@ -42,6 +42,7 @@ final class MockInserter: TextInserting {
     }
 }
 
+@MainActor
 final class SpyDelegate: DictationControllerDelegate {
     var states: [DictationState] = []
     var errors: [DictationError] = []

@@ -82,11 +82,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 extension AppDelegate: DictationControllerDelegate {
     func dictationStateDidChange(_ state: DictationState) {
         NSLog("kiki estado: \(state)")
-        Task { @MainActor in self.hud.show(state: state) }
+        hud.show(state: state)
     }
 
     func dictationDidFail(_ error: DictationError) {
         NSLog("kiki error: \(String(describing: error))")
-        Task { @MainActor in self.hud.show(state: .idle) }
+        hud.show(state: .idle)
     }
 }

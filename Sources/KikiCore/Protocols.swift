@@ -27,6 +27,7 @@ public protocol TextInserting: AnyObject {
     func insert(_ text: String) throws
 }
 
+@MainActor
 public protocol DictationControllerDelegate: AnyObject {
     func dictationStateDidChange(_ state: DictationState)
     func dictationDidFail(_ error: DictationError)

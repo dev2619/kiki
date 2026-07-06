@@ -40,6 +40,7 @@ final class HUDController {
     }
 
     private func positionAtBottomCenter() {
+        // NSScreen.main returns the screen with the key window (follows focus); intentional for dictation HUD positioning
         guard let screen = NSScreen.main else { return }
         let visible = screen.visibleFrame
         let size = panel.frame.size
