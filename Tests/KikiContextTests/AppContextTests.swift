@@ -184,14 +184,4 @@ final class FrontmostAppContextTests: XCTestCase {
     // Note: FrontmostAppContext is not unit-tested as it uses NSWorkspace
     // which requires the real system. This is integration testing territory.
     // The pure function BundleProfileMap.profile is tested above.
-
-    func testFrontmostAppContextCanBeInitialized() {
-        let context = FrontmostAppContext()
-        XCTAssertNotNil(context)
-    }
-
-    func testFrontmostAppContextConformsToContextProviding() {
-        let context: ContextProviding = FrontmostAppContext()
-        XCTAssertNotNil(context)
-    }
 }

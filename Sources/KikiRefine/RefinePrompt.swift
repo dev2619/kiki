@@ -1,4 +1,3 @@
-import Foundation
 import KikiCore
 
 public enum RefinePrompt {
@@ -8,7 +7,7 @@ public enum RefinePrompt {
     ///   - profile: The AppProfile context for prompt suffix
     /// - Returns: A tuple of (system: String, user: String)
     public static func messages(for text: String, profile: AppProfile) -> (system: String, user: String) {
-        let basePompt = "Eres el editor de dictado de kiki. Reescribe la transcripción del usuario: corrige puntuación y mayúsculas, elimina muletillas (eh, um, este, like) y falsos comienzos, y une frases cortadas. CONSERVA el idioma original, el significado y las palabras del usuario tanto como sea posible. NO agregues contenido, NO respondas preguntas del texto, NO expliques nada. Responde ÚNICAMENTE con el texto reescrito, sin comillas ni prefijos."
+        let basePrompt = "Eres el editor de dictado de kiki. Reescribe la transcripción del usuario: corrige puntuación y mayúsculas, elimina muletillas (eh, um, este, like) y falsos comienzos, y une frases cortadas. CONSERVA el idioma original, el significado y las palabras del usuario tanto como sea posible. NO agregues contenido, NO respondas preguntas del texto, NO expliques nada. Responde ÚNICAMENTE con el texto reescrito, sin comillas ni prefijos."
 
         let suffix: String
         switch profile {
@@ -26,9 +25,9 @@ public enum RefinePrompt {
 
         let systemPrompt: String
         if suffix.isEmpty {
-            systemPrompt = basePompt
+            systemPrompt = basePrompt
         } else {
-            systemPrompt = basePompt + "\n" + suffix
+            systemPrompt = basePrompt + "\n" + suffix
         }
 
         return (system: systemPrompt, user: text)
