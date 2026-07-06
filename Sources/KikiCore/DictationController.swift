@@ -1,5 +1,21 @@
 import Foundation
 
+func withThrowingTimeout<T: Sendable>(
+    seconds: TimeInterval,
+    operation: @escaping @Sendable () async throws -> T
+) async throws -> T {
+    try await withThrowingTaskGroup(of: T.self) { group in
+        group.addTask { try await operation() }
+        group.addTask {
+            try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+            throw DictationError.transcriptionFailed("refinado excedió \(seconds)s")
+        }
+        let result = try await group.next()!
+        group.cancelAll()
+        return result
+    }
+}
+
 /// Máquina de estados del loop de dictado: idle → recording → processing → idle.
 /// Los colaboradores se inyectan por protocolo para poder testear con mocks.
 @MainActor
@@ -11,18 +27,27 @@ public final class DictationController {
     private let transcriber: Transcribing
     private let inserter: TextInserting
     private let minimumSamples: Int
+    private let refiner: Refining?
+    private let context: ContextProviding?
+    private let refineTimeout: TimeInterval
 
     public init(
         recorder: AudioRecording,
         transcriber: Transcribing,
         inserter: TextInserting,
         minimumDuration: TimeInterval = 0.3,
-        sampleRate: Double = 16_000
+        sampleRate: Double = 16_000,
+        refiner: Refining? = nil,
+        context: ContextProviding? = nil,
+        refineTimeout: TimeInterval = 5
     ) {
         self.recorder = recorder
         self.transcriber = transcriber
         self.inserter = inserter
         self.minimumSamples = Int(minimumDuration * sampleRate)
+        self.refiner = refiner
+        self.context = context
+        self.refineTimeout = refineTimeout
     }
 
     public func hotkeyPressed() {
@@ -50,7 +75,8 @@ public final class DictationController {
             KikiLog.log("kiki core: transcripción lista en \(String(format: "%.2f", Date().timeIntervalSince(started)))s — \(text.count) chars")
             let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
             if !trimmed.isEmpty {
-                try inserter.insert(trimmed)
+                let final = await refineOrFallback(trimmed)
+                try inserter.insert(final)
                 KikiLog.log("kiki core: texto insertado")
             } else {
                 KikiLog.log("kiki core: transcripción vacía, nada que insertar")
@@ -75,5 +101,26 @@ public final class DictationController {
         state = newState
         KikiLog.log("kiki estado: \(newState)")
         delegate?.dictationStateDidChange(newState)
+    }
+
+    private func refineOrFallback(_ text: String) async -> String {
+        guard let refiner else { return text }
+        let profile = context?.currentProfile() ?? .neutral
+        do {
+            let started = Date()
+            let refined = try await withThrowingTimeout(seconds: refineTimeout) {
+                try await refiner.refine(text, profile: profile)
+            }
+            let trimmedRefined = refined.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmedRefined.isEmpty else {
+                KikiLog.log("kiki core: refinado vacío — uso texto crudo")
+                return text
+            }
+            KikiLog.log("kiki core: refinado (\(profile.rawValue)) en \(String(format: "%.2f", Date().timeIntervalSince(started)))s")
+            return trimmedRefined
+        } catch {
+            KikiLog.log("kiki core: refinado falló (\(error)) — uso texto crudo")
+            return text
+        }
     }
 }

@@ -32,3 +32,16 @@ public protocol DictationControllerDelegate: AnyObject {
     func dictationStateDidChange(_ state: DictationState)
     func dictationDidFail(_ error: DictationError)
 }
+
+public enum AppProfile: String, Equatable, CaseIterable {
+    case code, chat, email, docs, neutral
+}
+
+public protocol ContextProviding: AnyObject {
+    func currentProfile() -> AppProfile
+}
+
+public protocol Refining: AnyObject {
+    /// Devuelve el texto refinado. Lanza si falla; el controller degrada a crudo.
+    func refine(_ text: String, profile: AppProfile) async throws -> String
+}

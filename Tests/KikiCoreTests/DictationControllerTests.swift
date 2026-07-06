@@ -42,6 +42,37 @@ final class MockInserter: TextInserting {
     }
 }
 
+final class MockContext: ContextProviding {
+    var profileToReturn: AppProfile = .neutral
+    var receivedCallCount = 0
+
+    func currentProfile() -> AppProfile {
+        receivedCallCount += 1
+        return profileToReturn
+    }
+}
+
+final class MockRefiner: Refining {
+    var textToReturn: String?
+    var errorToThrow: Error?
+    var receivedTexts: [String] = []
+    var receivedProfiles: [AppProfile] = []
+    var delaySeconds: TimeInterval = 0
+
+    func refine(_ text: String, profile: AppProfile) async throws -> String {
+        receivedTexts.append(text)
+        receivedProfiles.append(profile)
+        if delaySeconds > 0 {
+            try await Task.sleep(nanoseconds: UInt64(delaySeconds * 1_000_000_000))
+        }
+        if let errorToThrow { throw errorToThrow }
+        guard let textToReturn else {
+            throw DictationError.transcriptionFailed("MockRefiner: no text to return")
+        }
+        return textToReturn
+    }
+}
+
 @MainActor
 final class SpyDelegate: DictationControllerDelegate {
     var states: [DictationState] = []
@@ -159,5 +190,117 @@ final class DictationControllerTests: XCTestCase {
         XCTAssertTrue(recorder.stopCalled)
         XCTAssertEqual(controller.state, .idle)
         XCTAssertTrue(inserter.inserted.isEmpty)
+    }
+
+    // MARK: - Refinement Tests (Phase 2)
+
+    func test_refinerOutputIsInserted() async {
+        let refiner = MockRefiner()
+        refiner.textToReturn = "texto pulido."
+        let context = MockContext()
+        controller = DictationController(
+            recorder: recorder, transcriber: transcriber, inserter: inserter,
+            refiner: refiner, context: context)
+        controller.delegate = delegate
+
+        transcriber.textToReturn = "hello world"
+        controller.hotkeyPressed()
+        await controller.hotkeyReleased()
+
+        XCTAssertEqual(inserter.inserted, ["texto pulido."])
+    }
+
+    func test_refinerReceivesProfileFromContext() async {
+        let refiner = MockRefiner()
+        refiner.textToReturn = "refined"
+        let context = MockContext()
+        context.profileToReturn = .code
+        controller = DictationController(
+            recorder: recorder, transcriber: transcriber, inserter: inserter,
+            refiner: refiner, context: context)
+        controller.delegate = delegate
+
+        transcriber.textToReturn = "raw text"
+        controller.hotkeyPressed()
+        await controller.hotkeyReleased()
+
+        XCTAssertEqual(refiner.receivedProfiles, [.code])
+    }
+
+    func test_nilContextUsesNeutralProfile() async {
+        let refiner = MockRefiner()
+        refiner.textToReturn = "refined"
+        controller = DictationController(
+            recorder: recorder, transcriber: transcriber, inserter: inserter,
+            refiner: refiner, context: nil)
+        controller.delegate = delegate
+
+        transcriber.textToReturn = "raw text"
+        controller.hotkeyPressed()
+        await controller.hotkeyReleased()
+
+        XCTAssertEqual(refiner.receivedProfiles, [.neutral])
+    }
+
+    func test_refinerErrorFallsBackToRawText() async {
+        let refiner = MockRefiner()
+        refiner.errorToThrow = NSError(domain: "test", code: 99)
+        let context = MockContext()
+        controller = DictationController(
+            recorder: recorder, transcriber: transcriber, inserter: inserter,
+            refiner: refiner, context: context)
+        controller.delegate = delegate
+
+        transcriber.textToReturn = "crudo"
+        controller.hotkeyPressed()
+        await controller.hotkeyReleased()
+
+        XCTAssertEqual(inserter.inserted, ["crudo"])
+        XCTAssertEqual(controller.state, .idle)
+        XCTAssertTrue(delegate.errors.isEmpty) // No dictationDidFail call
+    }
+
+    func test_refinerTimeoutFallsBackToRawText() async {
+        let refiner = MockRefiner()
+        refiner.textToReturn = "refined"
+        refiner.delaySeconds = 0.2 // Will exceed 0.1s timeout
+        let context = MockContext()
+        controller = DictationController(
+            recorder: recorder, transcriber: transcriber, inserter: inserter,
+            refiner: refiner, context: context, refineTimeout: 0.1)
+        controller.delegate = delegate
+
+        transcriber.textToReturn = "crudo"
+        controller.hotkeyPressed()
+        await controller.hotkeyReleased()
+
+        XCTAssertEqual(inserter.inserted, ["crudo"])
+        XCTAssertEqual(controller.state, .idle)
+        XCTAssertTrue(delegate.errors.isEmpty)
+    }
+
+    func test_emptyRefinerOutputFallsBackToRawText() async {
+        let refiner = MockRefiner()
+        refiner.textToReturn = "   \n  " // Empty after trimming
+        let context = MockContext()
+        controller = DictationController(
+            recorder: recorder, transcriber: transcriber, inserter: inserter,
+            refiner: refiner, context: context)
+        controller.delegate = delegate
+
+        transcriber.textToReturn = "crudo"
+        controller.hotkeyPressed()
+        await controller.hotkeyReleased()
+
+        XCTAssertEqual(inserter.inserted, ["crudo"])
+        XCTAssertEqual(controller.state, .idle)
+    }
+
+    func test_withoutRefinerBehavesAsPhase1() async {
+        controller.hotkeyPressed()
+        await controller.hotkeyReleased()
+        XCTAssertEqual(inserter.inserted, ["hello world"])
+        XCTAssertEqual(controller.state, .idle)
+        XCTAssertEqual(delegate.states, [.recording, .processing, .idle])
     }
 }
