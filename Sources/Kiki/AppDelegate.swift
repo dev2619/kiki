@@ -10,6 +10,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let recorder = AudioRecorder()
     let transcriber = WhisperTranscriber()
     private var hotkey: HotkeyMonitor!
+    private var hud: HUDController!
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         Permissions.requestMicrophoneAccess()
@@ -20,6 +21,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             transcriber: transcriber,
             inserter: PasteInserter())
         controller.delegate = self
+
+        hud = HUDController()
+        recorder.onLevel = { [weak self] level in
+            Task { @MainActor in self?.hud.updateLevel(level) }
+        }
 
         setUpStatusItem()
         loadModelInBackground()
@@ -76,9 +82,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 extension AppDelegate: DictationControllerDelegate {
     func dictationStateDidChange(_ state: DictationState) {
         NSLog("kiki estado: \(state)")
+        Task { @MainActor in self.hud.show(state: state) }
     }
 
     func dictationDidFail(_ error: DictationError) {
         NSLog("kiki error: \(String(describing: error))")
+        Task { @MainActor in self.hud.show(state: .idle) }
     }
 }
