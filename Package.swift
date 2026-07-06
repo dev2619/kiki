@@ -43,7 +43,7 @@ let package = Package(
         ),
         .executableTarget(
             name: "Kiki",
-            dependencies: ["KikiCore", "KikiAudio", "KikiInsert", "KikiSTT", "KikiContext", "KikiRefine"]
+            dependencies: ["KikiCore", "KikiAudio", "KikiInsert", "KikiSTT", "KikiContext", "KikiRefine", "KikiWake"]
         ),
         .testTarget(name: "KikiCoreTests", dependencies: ["KikiCore"]),
         .testTarget(name: "KikiContextTests", dependencies: ["KikiContext"]),

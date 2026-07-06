@@ -4,6 +4,7 @@ import KikiCore
 final class HUDModel: ObservableObject {
     @Published var state: DictationState = .idle
     @Published var level: Float = 0
+    @Published var armed: Bool = false
 }
 
 struct HUDView: View {
@@ -24,7 +25,11 @@ struct HUDView: View {
                     .controlSize(.small)
                 Text("Procesando…")
             case .idle:
-                EmptyView()
+                if model.armed {
+                    Text("👂 Te escucho…")
+                } else {
+                    EmptyView()
+                }
             }
         }
         .font(.system(size: 13, weight: .medium))

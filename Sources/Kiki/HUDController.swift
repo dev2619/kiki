@@ -39,6 +39,16 @@ final class HUDController {
         model.level = level
     }
 
+    func showArmed(_ on: Bool) {
+        model.armed = on
+        if on {
+            positionAtBottomCenter()
+            panel.orderFrontRegardless()
+        } else if model.state == .idle {
+            panel.orderOut(nil)
+        }
+    }
+
     private func positionAtBottomCenter() {
         // NSScreen.main returns the screen with the key window (follows focus); intentional for dictation HUD positioning
         guard let screen = NSScreen.main else { return }
