@@ -9,6 +9,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private(set) var controller: DictationController!
     let recorder = AudioRecorder()
     let transcriber = WhisperTranscriber()
+    private var hotkey: HotkeyMonitor!
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         Permissions.requestMicrophoneAccess()
@@ -22,6 +23,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         setUpStatusItem()
         loadModelInBackground()
+
+        hotkey = HotkeyMonitor(
+            onPress: { [weak self] in
+                Task { @MainActor in self?.controller.hotkeyPressed() }
+            },
+            onRelease: { [weak self] in
+                Task { @MainActor in await self?.controller.hotkeyReleased() }
+            })
+        hotkey.start()
     }
 
     private func setUpStatusItem() {
