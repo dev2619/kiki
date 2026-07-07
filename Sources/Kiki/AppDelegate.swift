@@ -251,28 +251,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     ///
     /// Encendido del modo: mismos efectos secundarios que la rama ON de
     /// `toggleWake()` (persistir `wakeEnabled`, checkmark del menú, ícono),
-    /// pero SIN `wakeListener.start()` — en su lugar `resumeArmed()` (ver
-    /// abajo) aterriza directo en `.armed`, saltándose `.listening` por
-    /// completo.
+    /// pero SIN `wakeListener.start()` — en su lugar `armDirectly()` aterriza
+    /// directo en `.armed`, saltándose `.listening` por completo.
     ///
-    /// `resumeArmed()` comparte la misma precondición que `start()` (guard
-    /// `_state == .stopped` en `WakeListener`) y por diseño solo se llama tras
-    /// una captura ya entregada (sesión continua) — aquí es la primera
-    /// llamada de la sesión, pero el efecto que necesitamos (aterrizar
-    /// directo en `.armed`, régimen de 45s) es exactamente el mismo. Por el
-    /// ruteo de arriba, `armViaShortcut()` solo corre con `wakeEnabled` en
-    /// OFF, así que `wakeListener` debería estar siempre `.stopped` en este
-    /// punto (nunca se arrancó, o `toggleWake()`/`wakeStartFailed()` ya lo
-    /// pararon) — el `stop()` defensivo de abajo solo cubre un desync
-    /// wakeEnabled/listener que no debería ocurrir por construcción (ver
-    /// paranoia equivalente en `wakeStartFailed`), pero dejarlo sin cubrir
-    /// significaría que `resumeArmed()` se ignoraría en silencio (log "ya
-    /// activo") y el usuario quedaría con el modo recién encendido pero SIN
-    /// arme — peor que el costo de un `stop()` de más.
+    /// Timeouts: `armDirectly()` es un arme FRESCO — el primer timeout de
+    /// desarmado es el INICIAL de 8s, igual que un arme por frase: si no
+    /// dictas nada tras el atajo, el mic no queda caliente 45s. La primera
+    /// captura entregada asciende la sesión al régimen continuo de 45s por
+    /// el camino normal (`handleSegmentEnded`). `resumeArmed()` NO sirve
+    /// aquí: ese entry point continúa una sesión con captura ya entregada y
+    /// arranca directo en el régimen de 45s.
+    ///
+    /// `armDirectly()` comparte la misma precondición que `start()` (guard
+    /// `_state == .stopped` en `WakeListener`). Por el ruteo de arriba,
+    /// `armViaShortcut()` solo corre con `wakeEnabled` en OFF, así que
+    /// `wakeListener` debería estar siempre `.stopped` en este punto (nunca
+    /// se arrancó, o `toggleWake()`/`wakeStartFailed()` ya lo pararon) — el
+    /// `stop()` defensivo de abajo solo cubre un desync wakeEnabled/listener
+    /// que no debería ocurrir por construcción (ver paranoia equivalente en
+    /// `wakeStartFailed`), pero dejarlo sin cubrir significaría que
+    /// `armDirectly()` se ignoraría en silencio (log "ya activo") y el
+    /// usuario quedaría con el modo recién encendido pero SIN arme — peor
+    /// que el costo de un `stop()` de más.
     ///
     /// A diferencia de `arm()` (armado por frase, dentro de `WakeListener`),
-    /// `resumeArmed()` NO dispara `wakeListenerDidArm()` — esa notificación es
-    /// específica del camino "frase detectada". Por eso el cue (`Glass`,
+    /// `armDirectly()` NO dispara `wakeListenerDidArm()` — esa notificación
+    /// es específica del camino "frase detectada". Por eso el cue (`Glass`,
     /// mismo sonido que un arme por frase — misma intención semántica: "ya
     /// puedes hablar") y el HUD armado se disparan aquí mismo en vez de
     /// depender del delegate.
@@ -292,7 +296,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             wakeListener.stop()
         }
         do {
-            try wakeListener.resumeArmed()
+            try wakeListener.armDirectly()
             SoundCues.play(.armed)
             hud.showArmed(true)
         } catch {

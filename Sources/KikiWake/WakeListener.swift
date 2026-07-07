@@ -65,7 +65,9 @@ public protocol WakeListenerDelegate: AnyObject {
 /// termina la sesión completa, sin importar el régimen. `resumeArmed()`
 /// permite a la app relanzar el listener directamente en `.armed` (régimen de
 /// 45s) tras la pausa que exige procesar+pegar cada captura sin engines de
-/// audio simultáneos — ver `AppDelegate.resumeAsArmed`.
+/// audio simultáneos — ver `AppDelegate.resumeAsArmed`. `armDirectly()` es su
+/// gemelo para armes FRESCOS (⌥⌘K, sin frase ni captura previa): mismo
+/// plumbing, pero arranca en el régimen inicial de 8s.
 public final class WakeListener: @unchecked Sendable {
     public enum State: Equatable {
         case stopped
@@ -247,10 +249,11 @@ public final class WakeListener: @unchecked Sendable {
     /// `true` desde que se entregó la primera captura completa dentro del
     /// arme vigente; determina si el próximo timeout de desarmado usa
     /// `disarmTimeoutSeconds` (8s, sin dictado aún) o `continuousSessionTimeout`
-    /// (45s, sesión continua ya en marcha). Se resetea a `false` en `arm()` y
+    /// (45s, sesión continua ya en marcha). Se resetea a `false` en `arm()`,
+    /// en `armDirectly()` (arme fresco sin captura previa — régimen de 8s) y
     /// en toda transición de `.armed` de vuelta a `.listening`; `resumeArmed()`
-    /// lo fija en `true` porque por definición solo se llama tras haber
-    /// entregado ya una captura.
+    /// lo fija en `true` porque continúa una sesión que ya entregó al menos
+    /// una captura.
     private var hasCapturedInSession = false
 
     /// Pico de RMS observado en la ventana de calibración vigente (mientras
@@ -317,29 +320,55 @@ public final class WakeListener: @unchecked Sendable {
         }
     }
 
-    /// Como `start()`, pero aterriza directo en `.armed` (régimen de sesión
-    /// continua, timeout de 45s) en vez de `.listening`. Lo usa la app para
-    /// relanzar el listener tras la pausa que exige procesar+pegar cada
-    /// captura sin dos engines de audio simultáneos, sin perder la sesión de
-    /// dictado abierta ni pedir la frase de nuevo — ver
-    /// `AppDelegate.resumeAsArmed`. Semántica de `session` idéntica a
+    /// Como `start()`, pero aterriza directo en `.armed` CONTINUANDO una
+    /// sesión de dictado ya en marcha (régimen de sesión continua, timeout de
+    /// 45s) en vez de `.listening`. Lo usa la app para relanzar el listener
+    /// tras la pausa que exige procesar+pegar cada captura sin dos engines de
+    /// audio simultáneos, sin perder la sesión de dictado abierta ni pedir la
+    /// frase de nuevo — ver `AppDelegate.resumeAsArmed`. Se llama tras haber
+    /// entregado ya una captura en la sesión, por eso fija
+    /// `hasCapturedInSession = true` (régimen de 45s); para un arme FRESCO
+    /// sin captura previa (⌥⌘K, sin frase) usar `armDirectly()`, que arranca
+    /// en el régimen inicial de 8s. Semántica de `session` idéntica a
     /// `start()`: cada llamada la incrementa, invalidando cualquier
     /// transcripción en vuelo de una sesión anterior.
     public func resumeArmed() throws {
+        try startArmed(
+            continuingSession: true,
+            logLabel: "reanudado armado (sesión continua)")
+    }
+
+    /// Arme FRESCO directo en `.armed`, sin frase de activación ni captura
+    /// previa — el entry point del atajo ⌥⌘K (ver
+    /// `AppDelegate.armViaShortcut`). Mismo plumbing que `resumeArmed()`
+    /// (config `armedConfig`, bump de `session`, engine), con una sola
+    /// diferencia: `hasCapturedInSession` queda en `false`, así que el primer
+    /// timeout de desarmado es el INICIAL de 8s (`disarmTimeoutSeconds`) —
+    /// un arme sin dictado detrás debe desarmar rápido, igual que un arme
+    /// por frase. La primera captura entregada lo asciende al régimen de
+    /// sesión continua (45s) por el camino normal (`handleSegmentEnded`).
+    public func armDirectly() throws {
+        try startArmed(
+            continuingSession: false,
+            logLabel: "armado directo (sin frase)")
+    }
+
+    /// Plumbing común de `resumeArmed()`/`armDirectly()`: ambos aterrizan en
+    /// `.armed` y solo difieren en el régimen del primer timeout de desarmado
+    /// (`continuingSession` → `hasCapturedInSession`: 45s vs 8s — ver docs de
+    /// cada entry point).
+    private func startArmed(continuingSession: Bool, logLabel: String) throws {
         try queue.sync {
             guard _state == .stopped else {
-                KikiLog.log("kiki wake: resumeArmed() ignorado, ya activo (state=\(_state))")
+                KikiLog.log("kiki wake: arranque armado ignorado, ya activo (state=\(_state))")
                 return
             }
             resetSessionCounters()
-            // Por definición solo se llama tras haber entregado ya una
-            // captura en esta sesión, así que el próximo timeout es el de
-            // sesión continua (45s), no el inicial (8s).
-            hasCapturedInSession = true
+            hasCapturedInSession = continuingSession
             segmenter = makeSegmenter(config: armedConfig)
             try installTapAndStartEngine()
             _state = .armed
-            KikiLog.log("kiki wake: reanudado armado (sesión continua)")
+            KikiLog.log("kiki wake: \(logLabel)")
             KikiLog.log("kiki wake: umbral RMS efectivo \(String(format: "%.3f", speechRMSThreshold))")
             scheduleDisarmTimeout()
         }
