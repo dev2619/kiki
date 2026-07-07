@@ -19,6 +19,7 @@ final class SettingsWindowController {
     private var window: NSWindow?
     private let viewModel: SettingsViewModel
     private var keyObserver: NSObjectProtocol?
+    private var closeObserver: NSObjectProtocol?
 
     init(viewModel: SettingsViewModel) {
         self.viewModel = viewModel
@@ -28,14 +29,31 @@ final class SettingsWindowController {
         if let keyObserver {
             NotificationCenter.default.removeObserver(keyObserver)
         }
+        if let closeObserver {
+            NotificationCenter.default.removeObserver(closeObserver)
+        }
     }
 
+    /// Activa la app de verdad antes de mostrar la ventana. `NSApp.activate`
+    /// (sin `ignoringOtherApps:`, API moderna post-macOS 14) es, por sí solo,
+    /// insuficiente para una app `.accessory` (menu bar, sin ítem en Dock):
+    /// bajo activación cooperativa (Sonoma+, más estricta en macOS 26) el
+    /// sistema puede ordenar la ventana al frente sin transferirle el foco de
+    /// entrada real — la ventana se ve "key" (traffic lights coloreados) pero
+    /// los eventos de mouse nunca llegan a AppKit/SwiftUI. Subir a `.regular`
+    /// mientras Ajustes está abierta fuerza una activación real (aparece un
+    /// ícono de Dock — visible pero estándar para este patrón) y se revierte
+    /// a `.accessory` en `windowWillClose` para volver al modo puramente
+    /// menu-bar. Idempotente ante aperturas/cierres repetidos: `show()`
+    /// siempre re-sube a `.regular` sin importar el estado previo, y el
+    /// observer de cierre siempre baja a `.accessory`.
     func show() {
         viewModel.refreshAll()
+        NSApp.setActivationPolicy(.regular)
+        NSApp.activate()
 
         if let window {
             window.makeKeyAndOrderFront(nil)
-            NSApp.activate(ignoringOtherApps: true)
             return
         }
 
@@ -64,8 +82,19 @@ final class SettingsWindowController {
             Task { @MainActor in viewModel?.refreshAll() }
         }
 
+        // Vuelve a `.accessory` (puro menu-bar, sin Dock) al cerrar Ajustes —
+        // simétrico con el `setActivationPolicy(.regular)` de arriba. Sin
+        // esto, el ícono de Dock quedaría pegado incluso con la ventana
+        // cerrada.
+        closeObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.willCloseNotification,
+            object: newWindow,
+            queue: .main
+        ) { _ in
+            Task { @MainActor in NSApp.setActivationPolicy(.accessory) }
+        }
+
         newWindow.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
     }
 }
 
