@@ -18,9 +18,14 @@ enum JSONStore {
             let decoder = JSONDecoder()
             return try decoder.decode(T.self, from: data)
         } catch {
-            // Log corruption
+            // Back up the corrupt file for forensics before wiping the slate
+            // clean — otherwise the next save would silently clobber whatever
+            // user-authored data was left in the malformed file.
             let filename = fileURL.lastPathComponent
-            KikiLog.log("kiki store: \(filename) corrupto — reiniciando vacío")
+            let corruptURL = fileURL.appendingPathExtension("corrupt")
+            try? FileManager.default.removeItem(at: corruptURL)
+            try? FileManager.default.moveItem(at: fileURL, to: corruptURL)
+            KikiLog.log("kiki store: \(filename) corrupto — respaldado como .corrupt y reiniciando vacío")
             return nil
         }
     }

@@ -62,8 +62,45 @@ final class DictionaryStoreTests: XCTestCase {
         XCTAssertEqual(store.terms, [])
     }
 
+    func testCorruptFileIsBackedUpAsSidecar() {
+        let fileURL = tempDir.appendingPathComponent("dictionary.json")
+        let corruptBytes = "not valid json {{{".data(using: .utf8)!
+        try? corruptBytes.write(to: fileURL)
+
+        let store = DictionaryStore(directory: tempDir)
+        XCTAssertEqual(store.terms, [])
+
+        let sidecarURL = tempDir.appendingPathComponent("dictionary.json.corrupt")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: sidecarURL.path))
+        XCTAssertEqual(try? Data(contentsOf: sidecarURL), corruptBytes)
+        // The corrupt file itself should have been moved away, not duplicated.
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fileURL.path))
+    }
+
+    func testCorruptFileSidecarOverwritesPreviousSidecar() {
+        let fileURL = tempDir.appendingPathComponent("dictionary.json")
+        let sidecarURL = tempDir.appendingPathComponent("dictionary.json.corrupt")
+        try? "stale sidecar from a previous crash".data(using: .utf8)?.write(to: sidecarURL)
+
+        let corruptBytes = "not valid json {{{".data(using: .utf8)!
+        try? corruptBytes.write(to: fileURL)
+
+        _ = DictionaryStore(directory: tempDir)
+
+        XCTAssertEqual(try? Data(contentsOf: sidecarURL), corruptBytes)
+    }
+
     func testEmptyStoreIsEmpty() {
         let store = DictionaryStore(directory: tempDir)
+        XCTAssertEqual(store.terms, [])
+    }
+
+    func testAddEmptyOrWhitespaceIsNoOp() {
+        let store = DictionaryStore(directory: tempDir)
+        store.add("")
+        store.add("   ")
+        store.add("\t\n")
+
         XCTAssertEqual(store.terms, [])
     }
 }
@@ -142,9 +179,47 @@ final class SnippetStoreTests: XCTestCase {
         XCTAssertEqual(store.snippets, [])
     }
 
+    func testCorruptFileIsBackedUpAsSidecar() {
+        let fileURL = tempDir.appendingPathComponent("snippets.json")
+        let corruptBytes = "not valid json {{{".data(using: .utf8)!
+        try? corruptBytes.write(to: fileURL)
+
+        let store = SnippetStore(directory: tempDir)
+        XCTAssertEqual(store.snippets, [])
+
+        let sidecarURL = tempDir.appendingPathComponent("snippets.json.corrupt")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: sidecarURL.path))
+        XCTAssertEqual(try? Data(contentsOf: sidecarURL), corruptBytes)
+    }
+
     func testEmptyStoreIsEmpty() {
         let store = SnippetStore(directory: tempDir)
         XCTAssertEqual(store.snippets, [])
+    }
+
+    func testAddEmptyTriggerIsNoOp() {
+        let store = SnippetStore(directory: tempDir)
+        store.add(Snippet(trigger: "", template: "hello"))
+        store.add(Snippet(trigger: "   ", template: "hello"))
+
+        XCTAssertEqual(store.snippets, [])
+    }
+
+    func testAddEmptyTemplateIsNoOp() {
+        let store = SnippetStore(directory: tempDir)
+        store.add(Snippet(trigger: "greet", template: ""))
+        store.add(Snippet(trigger: "greet", template: "   "))
+
+        XCTAssertEqual(store.snippets, [])
+    }
+
+    func testAddDiacriticDuplicateIsNoOp() {
+        let store = SnippetStore(directory: tempDir)
+        store.add(Snippet(trigger: "café", template: "first"))
+        store.add(Snippet(trigger: "cafe", template: "second"))
+
+        XCTAssertEqual(store.snippets.count, 1)
+        XCTAssertEqual(store.snippets.first?.template, "first")
     }
 }
 
@@ -251,6 +326,19 @@ final class HistoryStoreTests: XCTestCase {
 
         let store = HistoryStore(directory: tempDir)
         XCTAssertEqual(store.entries, [])
+    }
+
+    func testCorruptFileIsBackedUpAsSidecar() {
+        let fileURL = tempDir.appendingPathComponent("history.json")
+        let corruptBytes = "not valid json {{{".data(using: .utf8)!
+        try? corruptBytes.write(to: fileURL)
+
+        let store = HistoryStore(directory: tempDir)
+        XCTAssertEqual(store.entries, [])
+
+        let sidecarURL = tempDir.appendingPathComponent("history.json.corrupt")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: sidecarURL.path))
+        XCTAssertEqual(try? Data(contentsOf: sidecarURL), corruptBytes)
     }
 
     func testEmptyStoreIsEmpty() {

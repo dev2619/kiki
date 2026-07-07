@@ -18,14 +18,17 @@ public final class DictionaryStore {
     }
 
     public func add(_ term: String) {
-        let normalized = term.trimmingCharacters(in: .whitespaces).lowercased()
+        let trimmed = term.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+
+        let normalized = trimmed.lowercased()
 
         // Check for duplicate (case-insensitive)
         if terms.contains(where: { $0.lowercased() == normalized }) {
             return
         }
 
-        terms.append(term.trimmingCharacters(in: .whitespaces))
+        terms.append(trimmed)
         persist()
     }
 
@@ -57,10 +60,16 @@ public final class SnippetStore {
     }
 
     public func add(_ snippet: Snippet) {
-        let normalizedTrigger = snippet.trigger.trimmingCharacters(in: .whitespaces).lowercased()
+        let trimmedTrigger = snippet.trigger.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedTemplate = snippet.template.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedTrigger.isEmpty, !trimmedTemplate.isEmpty else { return }
 
-        // Check for duplicate trigger (case-insensitive)
-        if snippets.contains(where: { $0.trigger.trimmingCharacters(in: .whitespaces).lowercased() == normalizedTrigger }) {
+        // Dedupe with the SAME normalization SnippetAdapter uses to match
+        // dictated text at runtime (lowercase + diacritic folding + per-word
+        // punctuation strip) — see SnippetNormalization — so "café" and
+        // "cafe" collide here exactly like they would at match time.
+        let normalizedTrigger = SnippetNormalization.normalize(trimmedTrigger)
+        if snippets.contains(where: { SnippetNormalization.normalize($0.trigger) == normalizedTrigger }) {
             return
         }
 

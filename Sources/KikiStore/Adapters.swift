@@ -76,9 +76,12 @@ public final class DictionaryAdapter: DictionaryProviding, @unchecked Sendable {
 /// función aquí porque (a) es `private` y (b) `KikiStore` no depende de
 /// `KikiWake` — acoplar el store de personalización al target del pipeline de
 /// audio para reusar una función de 4 líneas no vale el acoplamiento. La
-/// normalización de abajo replica exactamente esa lógica (lowercase +
-/// diacritic folding con `locale: nil` + strip de puntuación por palabra); si
-/// `WakePhraseMatcher.normalizeWord` cambia, replicar el cambio aquí también.
+/// normalización usada aquí vive en `SnippetNormalization` (compartida con
+/// `SnippetStore.add` para que el dedupe al guardar y el matching en runtime
+/// no puedan divergir); replica exactamente la lógica de
+/// `WakePhraseMatcher.normalizeWord` (lowercase + diacritic folding con
+/// `locale: nil` + strip de puntuación por palabra) — si esa función cambia,
+/// replicar el cambio también en `SnippetNormalization`.
 public final class SnippetAdapter: SnippetExpanding {
     private let store: SnippetStore
 
@@ -87,21 +90,9 @@ public final class SnippetAdapter: SnippetExpanding {
     }
 
     public func expand(_ text: String) -> String? {
-        let normalizedInput = Self.normalize(text)
+        let normalizedInput = SnippetNormalization.normalize(text)
         guard !normalizedInput.isEmpty else { return nil }
-        return store.snippets.first { Self.normalize($0.trigger) == normalizedInput }?.template
-    }
-
-    static func normalize(_ text: String) -> String {
-        text
-            .split(separator: " ", omittingEmptySubsequences: true)
-            .map { word in
-                word
-                    .lowercased()
-                    .folding(options: .diacriticInsensitive, locale: nil)
-                    .trimmingCharacters(in: .punctuationCharacters)
-            }
-            .joined(separator: " ")
+        return store.snippets.first { SnippetNormalization.normalize($0.trigger) == normalizedInput }?.template
     }
 }
 
