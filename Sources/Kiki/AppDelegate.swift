@@ -11,6 +11,20 @@ import KikiWake
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private static let wakeEnabledKey = "kiki.wakeEnabled"
     private static let wakeMenuItemTag = 2
+    /// Umbral RMS de habla para `WakeListener`, calibrable en campo sin
+    /// rebuild — ver `WakeListener.init`. Ejemplo de uso en un mic marginal:
+    /// `defaults write com.dev2619.kiki kiki.wakeRMSThreshold 0.004`.
+    private static let wakeRMSThresholdKey = "kiki.wakeRMSThreshold"
+
+    /// Lee `kiki.wakeRMSThreshold` de `UserDefaults` si está presente y es
+    /// > 0; si no, cae al default de `WakeListener`. `UserDefaults` no
+    /// distingue "ausente" de "0.0" con `double(forKey:)`, por eso se
+    /// exige > 0 explícitamente en vez de solo comprobar `object(forKey:) != nil`.
+    private static func effectiveWakeRMSThreshold() -> Float {
+        let stored = UserDefaults.standard.double(forKey: wakeRMSThresholdKey)
+        guard stored > 0 else { return WakeListener.defaultSpeechRMSThreshold }
+        return Float(stored)
+    }
 
     /// `Application Support/kiki`, ubicación real de los stores de
     /// personalización (Fase 3, Task 4) — separada de cualquier directorio
@@ -78,7 +92,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             history: historyAdapter)
         controller.delegate = self
 
-        wakeListener = WakeListener(transcriber: transcriber)
+        wakeListener = WakeListener(transcriber: transcriber, speechRMSThreshold: Self.effectiveWakeRMSThreshold())
         wakeListener.delegate = self
 
         hud = HUDController()
@@ -367,10 +381,25 @@ extension AppDelegate: WakeListenerDelegate {
     }
 
     func wakeListenerDidCapture(samples: [Float]) {
+        // Guarda contra la carrera stale que `WakeListener.notificationEpoch`
+        // ya NO cubre para capturas (ver doc ahí): una captura en vuelo puede
+        // llegar aquí justo cuando el hotkey ya tomó control (`.recording` o
+        // `.processing` por un dictado manual). En ese caso la muestra es
+        // basura vieja — descartarla explícitamente en vez de dejar que
+        // `controller.process` la rechace por su cuenta, porque eso dejaría
+        // `resumeAsArmed` pegado en `true` sin que nada lo limpie después.
+        guard controller.state == .idle else {
+            KikiLog.log("kiki: captura descartada — dictado por tecla en curso")
+            return
+        }
         // Marca la pausa que sigue (dictationStateDidChange) como originada
         // por manos-libres: el resume debe usar resumeArmed(), no start(),
-        // para no perder la sesión continua ni pedir la frase de nuevo.
-        resumeAsArmed = true
+        // para no perder la sesión continua ni pedir la frase de nuevo. Solo
+        // si el modo manos-libres sigue activo — si el usuario lo apagó
+        // mientras esta captura estaba en vuelo, el dictado se entrega igual
+        // (diseño: nunca se pierde habla ya capturada) pero no debe rearmar
+        // el mic tras procesar.
+        resumeAsArmed = wakeEnabled
         // No hud.show(state: .idle) aquí: controller.process() dispara
         // dictationStateDidChange(.processing) casi de inmediato vía su
         // delegate, así que un orderOut(.idle) intermedio solo producía un
@@ -379,11 +408,16 @@ extension AppDelegate: WakeListenerDelegate {
     }
 
     func wakeListenerDidCaptureSameBreath(text: String) {
+        // Mismo guard que wakeListenerDidCapture — ver comentario ahí.
+        guard controller.state == .idle else {
+            KikiLog.log("kiki: captura descartada — dictado por tecla en curso")
+            return
+        }
         // Mismo razonamiento que wakeListenerDidCapture: el dictado en el
         // mismo aliento también abre/continúa una sesión continua — tras
         // procesarlo, el listener debe reanudar armado, no volver a
-        // listening plano.
-        resumeAsArmed = true
+        // listening plano. Gateado por `wakeEnabled` por la misma razón.
+        resumeAsArmed = wakeEnabled
         Task { await controller.processTranscript(text) }
     }
 

@@ -71,8 +71,21 @@ public final class WakeListener: @unchecked Sendable {
     /// percibida frase→chime sin comerse la cola de la frase en microfonos
     /// lentos a levantar la señal (Fase 3.6, task-361).
     private static let listeningEndSilence: TimeInterval = 0.5
-    private static let listeningConfig = SegmenterConfig(endSilence: listeningEndSilence, maxSegmentDuration: 6)
-    private static let armedConfig = SegmenterConfig(endSilence: 1.5, maxSegmentDuration: 30)
+    /// Duración mínima de habla para NO descartar un segmento en
+    /// `.listening`: bajado de los 0.4s por defecto de `SegmenterConfig` a
+    /// 0.25s. Motivo (bug de campo): en señal de mic marginal, la frase de
+    /// activación ("es-cú-cha-me") fragmenta en ráfagas <0.4s que cruzan el
+    /// umbral RMS de forma intermitente — con 0.4s cada fragmento se
+    /// descarta como "corto" y la frase nunca llega a Whisper. 0.25s le da
+    /// más chances a esos fragmentos sin tocar la máquina de estados del
+    /// segmenter. Solo aplica a `.listening`: `armedConfig` (dictado real,
+    /// ya armado) se queda en 0.4s por defecto — ahí un falso positivo corto
+    /// no tiene el mismo costo que perder la frase de activación completa.
+    private static let listeningMinSpeechDuration: TimeInterval = 0.25
+    /// Umbral RMS por defecto usado por ambos configs cuando `init` no
+    /// recibe uno explícito. Calibrable en campo sin rebuild vía
+    /// `UserDefaults` (`kiki.wakeRMSThreshold`) — ver `AppDelegate`.
+    public static let defaultSpeechRMSThreshold: Float = 0.008
     /// Timeout de desarmado inicial: rige entre `arm()` (frase detectada) y la
     /// primera captura completa. Corto a propósito — una frase dicha sin
     /// dictado detrás debe desarmar rápido.
@@ -109,7 +122,13 @@ public final class WakeListener: @unchecked Sendable {
     private let engine = AVAudioEngine()
     /// Cola serial: confina segmenter + estado, y es la cola destino del tap de audio.
     private let queue = DispatchQueue(label: "com.dev2619.kiki.wake-listener")
-    private var segmenter = SpeechSegmenter(config: WakeListener.listeningConfig)
+    /// Umbral RMS efectivo de esta instancia (ver `init`): alimenta tanto
+    /// `listeningConfig` como `armedConfig` para que la calibración de campo
+    /// (`kiki.wakeRMSThreshold`) afecte ambos regímenes por igual.
+    private let speechRMSThreshold: Float
+    private let listeningConfig: SegmenterConfig
+    private let armedConfig: SegmenterConfig
+    private var segmenter: SpeechSegmenter
 
     /// Solo una transcripción en vuelo a la vez; segmentos que llegan mientras
     /// hay una pendiente se descartan (ver `handleListeningSegment`).
@@ -127,31 +146,47 @@ public final class WakeListener: @unchecked Sendable {
     /// un cancel() disparado casi al mismo tiempo (p.ej. por speechStarted).
     private var disarmGeneration = 0
 
-    /// Incrementado únicamente en `stop()`. Fencing de las notificaciones al
-    /// delegate (ver `notify()`): una notificación ya despachada a la cola
-    /// del delegate (MainActor) antes de que `stop()` invalide la sesión no
-    /// debe poder actuar después de ese `stop()`.
+    /// Incrementado únicamente en `stop()`. Fencing de las notificaciones de
+    /// ESTADO al delegate (ver `notify()`): una notificación ya despachada a
+    /// la cola del delegate (MainActor) antes de que `stop()` invalide la
+    /// sesión no debe poder actuar después de ese `stop()`.
     ///
-    /// Carrera concreta que motiva esto: un segmento armado termina y
-    /// `handle()` ya corrió en `queue`, encolando `notify { $0.wakeListenerDidCapture(...) }`
-    /// como una `Task { @MainActor in ... }` — justo cuando el usuario
-    /// presiona Fn. El hotkey dispara su propio `Task { @MainActor in ... }`
-    /// que transiciona `DictationController` a `.recording`, y
+    /// Alcance del fence (decisión de diseño, ver `notify(fenced:)`): solo
+    /// cubre `didArm`/`didStartCapture`/`didDisarm`. `didCapture`/
+    /// `didCaptureSameBreath` están EXENTAS (`fenced: false`) — cargan habla
+    /// real del usuario, que debe entregarse siempre aunque haya un `stop()`
+    /// concurrente. El fence protege únicamente notificaciones cuyo efecto es
+    /// visible/de estado (rearmar el mic, mostrar HUD), donde una entrega
+    /// stale sí sería un bug observable.
+    ///
+    /// Carrera original que motivó este fence (antes de la exención de
+    /// captura): un segmento armado termina y `handle()` ya corrió en
+    /// `queue`, encolando `notify { $0.wakeListenerDidCapture(...) }` como
+    /// una `Task { @MainActor in ... }` — justo cuando el usuario presiona
+    /// Fn. El hotkey dispara su propio `Task { @MainActor in ... }` que
+    /// transiciona `DictationController` a `.recording`, y
     /// `dictationStateDidChange(.recording)` llama a `wakeListener.stop()`
     /// (síncrono sobre `queue`, invalida `session`). Si esa segunda Task
     /// corre en el MainActor ANTES que la primera (el orden entre dos
     /// `Task { @MainActor }` encoladas por separado no es FIFO garantizado),
-    /// la notificación de captura llega STALE: `AppDelegate` fija
-    /// `resumeAsArmed = true` y llama a `controller.process(samples:)`, que
-    /// descarta las muestras (`state != .idle`) pero deja `resumeAsArmed`
+    /// la notificación de captura llega STALE: `AppDelegate` fijaba
+    /// `resumeAsArmed = true` y llamaba a `controller.process(samples:)`, que
+    /// descartaba las muestras (`state != .idle`) pero dejaba `resumeAsArmed`
     /// pegado en `true` — al terminar el dictado por hotkey, el resume
     /// rearmaría el micrófono sin frase ni chime (regresión de privacidad).
-    /// Con este fence, `notify` captura `notificationEpoch` en el momento del
-    /// despacho (sobre `queue`) y la Task en MainActor la vuelve a leer
-    /// (`queue.sync`, deadlock-free por la misma invariante que ya usa el
-    /// accessor `state`: nada que corre sobre `queue` espera síncronamente al
-    /// MainActor) justo antes de invocar la acción — si `stop()` corrió en el
-    /// medio, el epoch ya cambió y la notificación se descarta sin efecto.
+    /// Ahora que la captura ya no pasa por el fence (debe entregarse
+    /// SIEMPRE — ver arriba), esa carrera se cierra del lado de
+    /// `AppDelegate` con un guard explícito sobre `controller.state == .idle`
+    /// en ambos manejadores de captura, que descarta la entrega stale por su
+    /// contenido (dictado por hotkey ya en curso) en vez de por el epoch.
+    ///
+    /// Para las notificaciones que sí quedan fenced, `notify` captura
+    /// `notificationEpoch` en el momento del despacho (sobre `queue`) y la
+    /// Task en MainActor la vuelve a leer (`queue.sync`, deadlock-free por la
+    /// misma invariante que ya usa el accessor `state`: nada que corre sobre
+    /// `queue` espera síncronamente al MainActor) justo antes de invocar la
+    /// acción — si `stop()` corrió en el medio, el epoch ya cambió y la
+    /// notificación se descarta sin efecto.
     private var notificationEpoch = 0
 
     /// Contador acumulado de muestras entregadas por el tap desde `start()`,
@@ -184,8 +219,25 @@ public final class WakeListener: @unchecked Sendable {
     /// para no ensuciar el log indefinidamente.
     private var calibrationWindowsLogged = 0
 
-    public init(transcriber: Transcribing) {
+    /// - Parameter speechRMSThreshold: Umbral RMS de habla, compartido por
+    ///   `listeningConfig` y `armedConfig`. Calibrable en campo sin rebuild
+    ///   — ver `AppDelegate` (`UserDefaults.kiki.wakeRMSThreshold`) — porque
+    ///   un umbral fijo de 0.008 puede quedar por encima del piso de ruido
+    ///   real de un mic marginal, fragmentando la señal en ráfagas cortas
+    ///   que nunca completan una ventana de calibración.
+    public init(transcriber: Transcribing, speechRMSThreshold: Float = WakeListener.defaultSpeechRMSThreshold) {
         self.transcriber = transcriber
+        self.speechRMSThreshold = speechRMSThreshold
+        self.listeningConfig = SegmenterConfig(
+            speechRMSThreshold: speechRMSThreshold,
+            endSilence: Self.listeningEndSilence,
+            minSpeechDuration: Self.listeningMinSpeechDuration,
+            maxSegmentDuration: 6)
+        self.armedConfig = SegmenterConfig(
+            speechRMSThreshold: speechRMSThreshold,
+            endSilence: 1.5,
+            maxSegmentDuration: 30)
+        self.segmenter = SpeechSegmenter(config: self.listeningConfig)
     }
 
     // MARK: - Public API
@@ -198,10 +250,11 @@ public final class WakeListener: @unchecked Sendable {
             }
             resetSessionCounters()
             hasCapturedInSession = false
-            segmenter = SpeechSegmenter(config: Self.listeningConfig)
+            segmenter = SpeechSegmenter(config: listeningConfig)
             try installTapAndStartEngine()
             _state = .listening
             KikiLog.log("kiki wake: listening iniciado")
+            KikiLog.log("kiki wake: umbral RMS efectivo \(String(format: "%.3f", speechRMSThreshold))")
         }
     }
 
@@ -224,10 +277,11 @@ public final class WakeListener: @unchecked Sendable {
             // captura en esta sesión, así que el próximo timeout es el de
             // sesión continua (45s), no el inicial (8s).
             hasCapturedInSession = true
-            segmenter = SpeechSegmenter(config: Self.armedConfig)
+            segmenter = SpeechSegmenter(config: armedConfig)
             try installTapAndStartEngine()
             _state = .armed
             KikiLog.log("kiki wake: reanudado armado (sesión continua)")
+            KikiLog.log("kiki wake: umbral RMS efectivo \(String(format: "%.3f", speechRMSThreshold))")
             scheduleDisarmTimeout()
         }
     }
@@ -282,10 +336,29 @@ public final class WakeListener: @unchecked Sendable {
             // al delegate que ya haya sido despachada (Task@MainActor
             // encolada) pero que todavía no haya corrido.
             notificationEpoch += 1
+            flushPartialCalibrationWindow()
             segmenter.reset()
             _state = .stopped
             KikiLog.log("kiki wake: detenido")
         }
+    }
+
+    /// Vuelca el pico de RMS acumulado en la ventana de calibración vigente
+    /// aunque no haya alcanzado los 10s completos (`calibrationWindowDuration`).
+    /// Bug de campo: sesiones cortas (p.ej. una prueba de 3s) nunca llegaban a
+    /// completar una ventana en `trackCalibrationWindow`, así que `stop()` no
+    /// dejaba NINGÚN dato de RMS en el log — sin esto, calibrar
+    /// `speechRMSThreshold` contra el mic real requería mantener el listener
+    /// activo al menos 10s, algo que el usuario no sabía y no siempre podía
+    /// cumplir en una prueba rápida.
+    private func flushPartialCalibrationWindow() {
+        dispatchPrecondition(condition: .onQueue(queue))
+        guard calibrationWindowsLogged < Self.calibrationMaxWindows,
+              calibrationWindowSampleCount > 0 else { return }
+        let seconds = Double(calibrationWindowSampleCount) / Self.sampleRate
+        KikiLog.log("kiki wake: pico RMS ventana parcial (\(String(format: "%.1f", seconds))s): \(String(format: "%.4f", calibrationPeakRMS))")
+        calibrationPeakRMS = 0
+        calibrationWindowSampleCount = 0
     }
 
     public func cancelCapture() {
@@ -296,7 +369,7 @@ public final class WakeListener: @unchecked Sendable {
             // el pre-roll que tenía el anterior, así que hay una ventana de
             // ~0.3s donde el primer audio entrante puede perderse antes de
             // que el buffer circular interno se rellene de nuevo.
-            segmenter = SpeechSegmenter(config: Self.listeningConfig)
+            segmenter = SpeechSegmenter(config: listeningConfig)
             _state = .listening
             suppressUntilSampleCount = nil
             hasCapturedInSession = false
@@ -387,7 +460,17 @@ public final class WakeListener: @unchecked Sendable {
             // `continuousSessionTimeout` (45s) vía `hasCapturedInSession`.
             hasCapturedInSession = true
             KikiLog.log("kiki wake: captura completa (\(samples.count) muestras), sesión continua sigue armada")
-            notify { $0.wakeListenerDidCapture(samples: samples) }
+            // fenced: false — decisión de diseño: una captura lleva habla
+            // real del usuario y debe entregarse SIEMPRE, aunque un stop()
+            // concurrente haya avanzado `notificationEpoch` antes de que esta
+            // Task corra en el MainActor. El fence protege notificaciones de
+            // ESTADO (armar/desarmar/empezar captura), donde una entrega
+            // stale causaría un efecto visible incorrecto (p.ej. rearmar el
+            // mic sin frase); perder un dictado ya capturado es peor que
+            // cualquier inconsistencia de estado que el fence evitaría aquí.
+            // La carrera original (hotkey pisando una captura en vuelo) ahora
+            // se cubre en `AppDelegate` con un guard sobre `controller.state`.
+            notify(fenced: false) { $0.wakeListenerDidCapture(samples: samples) }
             scheduleDisarmTimeout()
         case .stopped:
             break
@@ -458,7 +541,11 @@ public final class WakeListener: @unchecked Sendable {
         if match.remainder.isEmpty {
             arm()
         } else {
-            notify { $0.wakeListenerDidCaptureSameBreath(text: match.remainder) }
+            // fenced: false — mismo razonamiento que en handleSegmentEnded:
+            // el remainder es dictado real dicho en el mismo aliento que la
+            // frase, no una notificación de estado. Debe entregarse aunque
+            // un stop() concurrente haya avanzado el epoch.
+            notify(fenced: false) { $0.wakeListenerDidCaptureSameBreath(text: match.remainder) }
         }
     }
 
@@ -468,7 +555,7 @@ public final class WakeListener: @unchecked Sendable {
         // Frase nueva → arme inicial de la sesión: régimen de timeout corto
         // (8s) hasta la primera captura entregada.
         hasCapturedInSession = false
-        segmenter = SpeechSegmenter(config: Self.armedConfig)
+        segmenter = SpeechSegmenter(config: armedConfig)
         // Ver doc de postArmSuppression: el chime que dispara wakeListenerDidArm
         // (más abajo) no debe colarse en el segmenter recién armado.
         suppressUntilSampleCount = accumulatedSampleCount + Int(Self.postArmSuppression * Self.sampleRate)
@@ -510,7 +597,7 @@ public final class WakeListener: @unchecked Sendable {
         // speechStarted); si la generación ya avanzó, este disparo es stale.
         guard generation == disarmGeneration, _state == .armed else { return }
         disarmTask = nil
-        segmenter = SpeechSegmenter(config: Self.listeningConfig)
+        segmenter = SpeechSegmenter(config: listeningConfig)
         _state = .listening
         suppressUntilSampleCount = nil
         hasCapturedInSession = false
@@ -520,9 +607,26 @@ public final class WakeListener: @unchecked Sendable {
 
     // MARK: - Delegate hop
 
-    private func notify(_ action: @escaping @MainActor (WakeListenerDelegate) -> Void) {
+    /// - Parameter fenced: `true` (default) aplica el fence de
+    ///   `notificationEpoch` — usado por las notificaciones de ESTADO
+    ///   (`didArm`/`didStartCapture`/`didDisarm`), donde una entrega stale
+    ///   tras un `stop()` concurrente produciría un efecto visible
+    ///   incorrecto. `false` la exime del fence — usado exclusivamente por
+    ///   `wakeListenerDidCapture`/`wakeListenerDidCaptureSameBreath`: esas
+    ///   notificaciones cargan habla real del usuario capturada mientras el
+    ///   listener estaba activo, y deben entregarse siempre aunque un
+    ///   `stop()` concurrente haya avanzado el epoch — perder un dictado ya
+    ///   grabado es peor que la inconsistencia de estado que el fence evita.
+    ///   Ver comentarios en los call sites de captura y el guard equivalente
+    ///   en `AppDelegate` (`controller.state == .idle`), que cubre la carrera
+    ///   original (hotkey pisando una captura en vuelo) sin depender del fence.
+    private func notify(fenced: Bool = true, _ action: @escaping @MainActor (WakeListenerDelegate) -> Void) {
         dispatchPrecondition(condition: .onQueue(queue))
         guard let delegate else { return }
+        guard fenced else {
+            Task { @MainActor in action(delegate) }
+            return
+        }
         // Fence contra un `stop()` concurrente — ver doc de
         // `notificationEpoch` para la carrera exacta que esto cierra.
         let capturedEpoch = notificationEpoch
