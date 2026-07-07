@@ -90,7 +90,7 @@ Tras transcribir con Whisper, el texto se pasa a un modelo LLM local (Qwen2.5-3B
 2. Dicta el texto (mientras el modo esté activo, el ícono del menú cambia a waveform)
 3. **Silencio de 1.5 segundos** → fin de la utterance, transcripción, refinado y pegado (mismo flujo que hotkey)
 4. Texto insertado donde esté el cursor, y el HUD vuelve a "👂 Te escucho…" — la sesión sigue armada, lista para la siguiente utterance sin repetir la frase
-5. La sesión termina con **Esc**, apagando el toggle de manos libres, o tras **45 segundos de silencio** sin nueva utterance
+5. La sesión termina con **Esc**, apagando el toggle de manos libres, tras **45 segundos de silencio** sin nueva utterance, o usando el **dictado por tecla (Fn)** — el hotkey toma control explícito del micrófono (privacidad primero: una acción manual manda sobre la sesión manos-libres) y termina la sesión; vuelve a decir la frase para reabrirla
 
 Nota sobre timeouts: si dices la frase y no dictas nada después, el desarmado es más rápido (**8 segundos**) que el de silencio entre utterances dentro de una sesión ya en marcha (**45 segundos**) — evita quedarte "armado" indefinidamente por una frase suelta, sin cortar de golpe una sesión de dictado real mientras piensas la siguiente frase.
 
