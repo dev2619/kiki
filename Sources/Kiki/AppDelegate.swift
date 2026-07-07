@@ -5,11 +5,20 @@ import KikiCore
 import KikiInsert
 import KikiRefine
 import KikiSTT
+import KikiStore
 import KikiWake
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private static let wakeEnabledKey = "kiki.wakeEnabled"
     private static let wakeMenuItemTag = 2
+
+    /// `Application Support/kiki`, ubicación real de los stores de
+    /// personalización (Fase 3, Task 4) — separada de cualquier directorio
+    /// temporal usado en tests.
+    private static let personalizationDirectory: URL = {
+        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        return appSupport.appendingPathComponent("kiki")
+    }()
 
     private var statusItem: NSStatusItem!
     private(set) var controller: DictationController!
@@ -24,16 +33,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var wakeEnabled = UserDefaults.standard.bool(forKey: AppDelegate.wakeEnabledKey)
     private var wakePausedByDictation = false
 
+    // Stores + adapters de personalización (Fase 3, Task 3/4). AppDelegate es
+    // el dueño fuerte de todo esto; los providers que se inyectan en
+    // transcriber/refiner son `weak`, así que esta es la única referencia
+    // fuerte que los mantiene vivos.
+    let dictionaryStore = DictionaryStore(directory: AppDelegate.personalizationDirectory)
+    let snippetStore = SnippetStore(directory: AppDelegate.personalizationDirectory)
+    let historyStore = HistoryStore(directory: AppDelegate.personalizationDirectory)
+    private lazy var dictionaryAdapter = DictionaryAdapter(store: dictionaryStore)
+    private lazy var snippetAdapter = SnippetAdapter(store: snippetStore)
+    private lazy var historyAdapter = HistoryAdapter(store: historyStore)
+    private var settingsViewModel: SettingsViewModel!
+    private var settingsWindowController: SettingsWindowController!
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         Permissions.requestMicrophoneAccess()
         Permissions.ensureAccessibility()
+
+        settingsViewModel = SettingsViewModel(
+            dictionaryAdapter: dictionaryAdapter,
+            snippetStore: snippetStore,
+            historyStore: historyStore,
+            wakeEnabled: wakeEnabled,
+            onToggleWake: { [weak self] in self?.toggleWake() })
+        settingsWindowController = SettingsWindowController(viewModel: settingsViewModel)
 
         controller = DictationController(
             recorder: recorder,
             transcriber: transcriber,
             inserter: PasteInserter(),
             refiner: refiner,
-            context: appContext)
+            context: appContext,
+            snippets: snippetAdapter,
+            history: historyAdapter)
         controller.delegate = self
 
         wakeListener = WakeListener(transcriber: transcriber)
@@ -79,6 +111,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(status)
         menu.addItem(.separator())
 
+        let settingsItem = NSMenuItem(
+            title: "Ajustes…",
+            action: #selector(openSettings),
+            keyEquivalent: ",")
+        settingsItem.target = self
+        menu.addItem(settingsItem)
+
         let wakeItem = NSMenuItem(
             title: "Manos libres: \"escúchame kiki\"",
             action: #selector(toggleWake),
@@ -105,6 +144,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let symbolName = wakeEnabled ? "waveform" : "mic.fill"
         statusItem.button?.image = NSImage(
             systemSymbolName: symbolName, accessibilityDescription: "kiki")
+    }
+
+    @MainActor @objc private func openSettings() {
+        settingsWindowController.show()
     }
 
     @MainActor @objc private func toggleWake() {
@@ -135,6 +178,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         statusItem.menu?.item(withTag: Self.wakeMenuItemTag)?.state = wakeEnabled ? .on : .off
         updateStatusIcon()
+        settingsViewModel.syncWakeEnabled(wakeEnabled)
     }
 
     /// Centraliza la reacción a un `start()` que falla, tanto en el toggle
@@ -148,6 +192,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         UserDefaults.standard.set(false, forKey: Self.wakeEnabledKey)
         statusItem.menu?.item(withTag: Self.wakeMenuItemTag)?.state = .off
         updateStatusIcon()
+        settingsViewModel.syncWakeEnabled(wakeEnabled)
     }
 
     private func loadModelInBackground() {
@@ -155,6 +200,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // del LLM queden serializadas — evita llamadas concurrentes a
         // prepare() en ambos modelos.
         Task {
+            // Diccionario personal (Fase 3, Task 3/4): se inyecta ANTES de
+            // prepare() para que ya esté disponible desde la primera
+            // transcripción/refinado, no solo desde el segundo dictado en
+            // adelante. `transcriber` es un actor → requiere `await`;
+            // `refiner` es una clase plana → llamada síncrona directa.
+            await self.transcriber.setDictionaryProvider(self.dictionaryAdapter)
+            self.refiner.setDictionaryProvider(self.dictionaryAdapter)
+
             do {
                 try await self.transcriber.prepare()
             } catch {
