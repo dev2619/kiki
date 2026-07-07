@@ -110,6 +110,14 @@ public final class SpeechSegmenter {
     /// Accumulated samples during silence in speech state (for duration detection only)
     private var accumulatedSilenceSamples: Int = 0
 
+    /// Running max RMS observed during the CURRENT speech segment (used by
+    /// relative-drop end detection — see `endDropRatio`). Set to the
+    /// triggering chunk's RMS on every silence→speech transition and updated
+    /// to the max on every subsequent chunk classified as speech; reset
+    /// alongside the other per-segment accumulators whenever a segment ends,
+    /// is discarded, or is flushed.
+    private var segmentPeakRMS: Float = 0
+
     // MARK: - Adaptive noise floor (see `SegmenterConfig.adaptiveThreshold`)
     //
     // Design summary: the noise floor is an EMA of chunk RMS, updated only on
@@ -180,6 +188,38 @@ public final class SpeechSegmenter {
     /// `SpeechSegmenterTests`, which encode that exact semantics and must
     /// not change.
     private static let exitThresholdRatio: Float = 0.55
+
+    /// Relative end-of-speech drop ratio (adaptive mode only): once a speech
+    /// segment is under way, the bar to REMAIN classified as speech is
+    /// `max(exitThreshold, segmentPeakRMS * endDropRatio)` — i.e. well below
+    /// THIS utterance's own peak volume, not just below some absolute noise
+    /// floor. This is the fix for the field bug where absolute-energy
+    /// end-of-speech detection fails entirely in a noisy room: ambient RMS
+    /// (e.g. 0.045) can sit permanently above even the (already-lowered)
+    /// exit threshold (e.g. 0.0022), so the segment never classifies as
+    /// silence and never ends at all — see the field log ("pico RMS últimos
+    /// 10s: 0.0453 (umbral 0.0040 / salida 0.0022)" followed by a partial
+    /// window forcibly stopped with nothing processed). Tracking the
+    /// segment's own peak sidesteps that: a user's voice dropping to 35% of
+    /// its own loudest moment mid-utterance is a reliable "I stopped
+    /// talking" signal regardless of how loud the room is — as long as the
+    /// room noise itself isn't as loud as the speech (see the HONEST LIMIT
+    /// below). `max()` with `exitThreshold` keeps quiet-room legacy behavior
+    /// intact: there `segmentPeakRMS * endDropRatio` is typically BELOW the
+    /// absolute exit threshold, so the absolute check still governs and
+    /// normal speech still ends the same way it always did.
+    ///
+    /// HONEST LIMIT (documented, not silently glossed over): if ambient
+    /// noise is close to, or louder than, the user's own speech level, there
+    /// is no meaningful relative drop to detect — energy-based VAD
+    /// fundamentally cannot find end-of-speech in that regime, relative or
+    /// absolute. That case needs a neural VAD (e.g. Silero), tracked as
+    /// backlog. This fix handles the much more common "moderate noise +
+    /// clearly audible voice over it" case, not extreme noise where speech
+    /// and ambient are comparably loud. `WakeListener.stopAndFlush()`
+    /// provides a manual escape hatch (flush in-progress audio on
+    /// intentional stop) for whatever this can't detect automatically.
+    private static let endDropRatio: Float = 0.35
 
     /// Absolute floor on the effective threshold: even a dead-silent room
     /// (noise floor near zero) must not classify near-zero-RMS noise/whispers
@@ -268,7 +308,13 @@ public final class SpeechSegmenter {
         let classificationThreshold: Float
         if config.adaptiveThreshold {
             if case .speech = state {
-                classificationThreshold = exitThreshold
+                // Relative-drop end detection (see `endDropRatio` doc): the
+                // bar to REMAIN classified as speech is whichever is higher
+                // of the absolute exit threshold and a fraction of this
+                // segment's peak so far. `segmentPeakRMS` here reflects the
+                // peak BEFORE this chunk (updated below, after
+                // classification), so this is never self-referential.
+                classificationThreshold = max(exitThreshold, segmentPeakRMS * Self.endDropRatio)
             } else {
                 classificationThreshold = effectiveThreshold
             }
@@ -276,6 +322,13 @@ public final class SpeechSegmenter {
             classificationThreshold = config.speechRMSThreshold
         }
         let isSpeech = rms >= classificationThreshold
+        // Grow the segment's peak from this chunk once classification is
+        // decided (never from the classification itself — see comment
+        // above). Only meaningful mid-utterance; the entry chunk's peak is
+        // seeded separately below once `.speechStarted` is known.
+        if case .speech = state, isSpeech {
+            segmentPeakRMS = max(segmentPeakRMS, rms)
+        }
         // Captured BEFORE this chunk's state transition: floor updates gate
         // on the state the segmenter was in WHILE this chunk was observed,
         // not whatever it transitions to as a result of processing it.
@@ -291,6 +344,13 @@ public final class SpeechSegmenter {
 
         case .awaitingSilence:
             event = processAwaitingSilenceState(chunk: chunk, isSpeech: isSpeech)
+        }
+
+        // Seed the new segment's peak with the triggering chunk's RMS. Only
+        // `processSilenceState` can produce `.speechStarted`, so this only
+        // ever fires on a genuine silence→speech transition.
+        if event == .speechStarted {
+            segmentPeakRMS = rms
         }
 
         if config.adaptiveThreshold {
@@ -309,6 +369,7 @@ public final class SpeechSegmenter {
         trailingModeSilenceSamples = []
         accumulatedSampleCount = 0
         accumulatedSilenceSamples = 0
+        segmentPeakRMS = 0
         noiseFloorEstimate = config.speechRMSThreshold / Self.noiseFloorMultiplier
         noiseFloorSeeded = false
         effectiveThreshold = config.speechRMSThreshold
@@ -400,6 +461,7 @@ public final class SpeechSegmenter {
             accumulatedSpeechSamples = []
             trailingModeSilenceSamples = []
             accumulatedSampleCount = 0
+            segmentPeakRMS = 0
             // Clear pre-roll on discard: the ring may hold speech from the
             // just-discarded monologue rather than genuine silence, so it must
             // not leak into whatever segment starts next. Contrast with
@@ -504,6 +566,7 @@ public final class SpeechSegmenter {
         trailingModeSilenceSamples = []
         accumulatedSampleCount = 0
         accumulatedSilenceSamples = 0
+        segmentPeakRMS = 0
         // Pre-roll buffer is NOT cleared; it stays for the next utterance.
         // Intentional asymmetry vs. the "máximo" discard path above (which DOES
         // clear it): a normal segment end is preceded by genuine sustained

@@ -63,7 +63,19 @@ final class VADHysteresisTests: XCTestCase {
         // the EXIT threshold (~0.00787) for 2s (20 chunks). Without
         // hysteresis this would be misclassified as silence and, since 2s >
         // endSilence (1.5s), would falsely end the segment mid-sentence.
-        let softTailRMS: Float = 0.009
+        //
+        // 0.012, not the exit threshold's own headroom minimum: relative-drop
+        // end detection (see `SpeechSegmenter.endDropRatio`, added alongside
+        // this hysteresis fix for a different field bug) also gates
+        // continued-speech classification on `segmentPeakRMS * 0.35` = 0.03 *
+        // 0.35 = 0.0105 here, which is HIGHER than the exit threshold in this
+        // particular scenario (modest 2.1x peak/threshold headroom). The
+        // soft-tail value must clear the higher of the two bars — same as
+        // production code does via `max()` — to still exercise "hysteresis
+        // legitimately keeps soft speech classified as speech" rather than
+        // accidentally tripping the (correct, intentional) relative-drop
+        // check instead.
+        let softTailRMS: Float = 0.012
         for i in 0..<20 {
             let event = segmenter.process(chunk: chunk(), rms: softTailRMS)
             if case .segmentEnded = event {
