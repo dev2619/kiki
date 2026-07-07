@@ -108,6 +108,15 @@ Tras transcribir con Whisper, el texto se pasa a un modelo LLM local (Qwen2.5-3B
 - Si el modelo no se descarga en el inicio, el menú dice "Listo (sin refinado IA)" — la app funciona con Whisper solo (Fase 1).
 - El dictado nunca se pierde: siempre hay algo que insertar.
 
+## Modo traducción (Fase 3.7)
+
+Toggle **"Traducir al dictar"** en el menú 🎤 y en Ajustes → General (apagado por defecto).
+
+- **Apagado (fidelidad):** kiki fija la salida al idioma que detecta Whisper y **nunca traduce** — hablas en inglés, escribe en inglés; hablas en español, escribe en español. (Esto corrige la deriva del modelo pequeño, que sin fijar idioma a veces traducía o inventaba.)
+- **Encendido (traducción):** habla en un idioma y kiki escribe en el otro — español↔inglés, detectando automáticamente el idioma de origen. El HUD muestra "Traduciendo…". Los términos del diccionario se respetan sin traducir.
+
+El idioma detectado por Whisper se pasa junto al texto hasta el paso de IA, así que la elección de idioma corresponde exactamente a la frase dictada (sin condiciones de carrera entre transcripciones).
+
 ## Manos libres (Fase 2B, mejorada en 3.6)
 
 **Activación:** dos entradas, dos intents distintos:
