@@ -123,8 +123,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         })
         escMonitor.start()
 
+        // ⌥⌘K con manos-libres OFF arma el dictado DIRECTAMENTE
+        // (`armViaShortcut`, sin frase); con manos-libres ON (escuchando o ya
+        // armado) apaga todo — mismo camino que el toggle del menú
+        // (`toggleWake`, semántica OFF sin cambios). Dos intents distintos
+        // para el mismo atajo según el estado vigente — ver README §Manos
+        // libres.
         wakeToggleShortcut = WakeToggleShortcut(onToggle: { [weak self] in
-            Task { @MainActor in self?.toggleWake() }
+            Task { @MainActor in
+                guard let self else { return }
+                if self.wakeEnabled {
+                    self.toggleWake()
+                } else {
+                    self.armViaShortcut()
+                }
+            }
         })
         wakeToggleShortcut.start()
     }
@@ -228,6 +241,63 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem.menu?.item(withTag: Self.wakeMenuItemTag)?.state = wakeEnabled ? .on : .off
         updateStatusIcon()
         settingsViewModel.syncWakeEnabled(wakeEnabled)
+    }
+
+    /// ⌥⌘K con manos-libres OFF: no solo activa el modo, ARMA el dictado
+    /// directamente — el usuario habla de inmediato, sin decir la frase de
+    /// activación. Ruteado solo desde el estado OFF (ver `wakeToggleShortcut`
+    /// arriba); con manos-libres ON el mismo atajo cae en `toggleWake()`
+    /// (semántica existente, sin cambios).
+    ///
+    /// Encendido del modo: mismos efectos secundarios que la rama ON de
+    /// `toggleWake()` (persistir `wakeEnabled`, checkmark del menú, ícono),
+    /// pero SIN `wakeListener.start()` — en su lugar `resumeArmed()` (ver
+    /// abajo) aterriza directo en `.armed`, saltándose `.listening` por
+    /// completo.
+    ///
+    /// `resumeArmed()` comparte la misma precondición que `start()` (guard
+    /// `_state == .stopped` en `WakeListener`) y por diseño solo se llama tras
+    /// una captura ya entregada (sesión continua) — aquí es la primera
+    /// llamada de la sesión, pero el efecto que necesitamos (aterrizar
+    /// directo en `.armed`, régimen de 45s) es exactamente el mismo. Por el
+    /// ruteo de arriba, `armViaShortcut()` solo corre con `wakeEnabled` en
+    /// OFF, así que `wakeListener` debería estar siempre `.stopped` en este
+    /// punto (nunca se arrancó, o `toggleWake()`/`wakeStartFailed()` ya lo
+    /// pararon) — el `stop()` defensivo de abajo solo cubre un desync
+    /// wakeEnabled/listener que no debería ocurrir por construcción (ver
+    /// paranoia equivalente en `wakeStartFailed`), pero dejarlo sin cubrir
+    /// significaría que `resumeArmed()` se ignoraría en silencio (log "ya
+    /// activo") y el usuario quedaría con el modo recién encendido pero SIN
+    /// arme — peor que el costo de un `stop()` de más.
+    ///
+    /// A diferencia de `arm()` (armado por frase, dentro de `WakeListener`),
+    /// `resumeArmed()` NO dispara `wakeListenerDidArm()` — esa notificación es
+    /// específica del camino "frase detectada". Por eso el cue (`Glass`,
+    /// mismo sonido que un arme por frase — misma intención semántica: "ya
+    /// puedes hablar") y el HUD armado se disparan aquí mismo en vez de
+    /// depender del delegate.
+    @MainActor private func armViaShortcut() {
+        guard controller.state == .idle else {
+            hud.showTransient("No disponible durante un dictado")
+            return
+        }
+        if !wakeEnabled {
+            wakeEnabled = true
+            UserDefaults.standard.set(true, forKey: Self.wakeEnabledKey)
+            settingsViewModel.syncWakeEnabled(wakeEnabled)
+            statusItem.menu?.item(withTag: Self.wakeMenuItemTag)?.state = .on
+            updateStatusIcon()
+        }
+        if wakeListener.state != .stopped {
+            wakeListener.stop()
+        }
+        do {
+            try wakeListener.resumeArmed()
+            SoundCues.play(.armed)
+            hud.showArmed(true)
+        } catch {
+            wakeStartFailed(error, context: "al armar directamente vía atajo")
+        }
     }
 
     /// Centraliza la reacción a un `start()` que falla, tanto en el toggle

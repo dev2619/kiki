@@ -89,7 +89,9 @@ Tras transcribir con Whisper, el texto se pasa a un modelo LLM local (Qwen2.5-3B
 
 ## Manos libres (Fase 2B, mejorada en 3.6)
 
-**Activación:** Menú 🎤 → "Manos libres" (toggle; desactivado por defecto, almacenado en UserDefaults). Atajo global **⌥⌘K** alterna manos libres desde cualquier app — una confirmación visual (pill) aparece en el HUD.
+**Activación:** dos entradas, dos intents distintos:
+- **Menú 🎤 → "Manos libres"** (toggle; desactivado por defecto, almacenado en UserDefaults) — solo **vigilancia**: activa la escucha de la frase de activación, sin armar el dictado.
+- **Atajo global ⌥⌘K** — **dictar ya**: con manos libres apagado, ⌥⌘K enciende el modo Y arma el dictado **directamente, sin decir la frase** (**Glass** + pill "👂 Te escucho…", listo para hablar de inmediato). La frase de activación sigue funcionando en paralelo mientras el modo queda activo. Un segundo ⌥⌘K (con manos libres ya activo, escuchando o armado) apaga todo — sesión + modo (**Bottle** + pill "Manos libres desactivado"), mismo efecto que apagar el toggle del menú.
 
 **Frases de activación:**
 - **"escúchame kiki"** — inicia grabación de micrófono en modo manos libres
