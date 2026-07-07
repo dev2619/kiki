@@ -87,20 +87,30 @@ Tras transcribir con Whisper, el texto se pasa a un modelo LLM local (Qwen2.5-3B
 - Si el modelo no se descarga en el inicio, el menú dice "Listo (sin refinado IA)" — la app funciona con Whisper solo (Fase 1).
 - El dictado nunca se pierde: siempre hay algo que insertar.
 
-## Manos libres (Fase 2B)
+## Manos libres (Fase 2B, mejorada en 3.6)
 
-**Activación:** Menú 🎤 → "Manos libres" (toggle; desactivado por defecto, almacenado en UserDefaults).
+**Activación:** Menú 🎤 → "Manos libres" (toggle; desactivado por defecto, almacenado en UserDefaults). Atajo global **⌥⌘K** alterna manos libres desde cualquier app — una confirmación visual (pill) aparece en el HUD.
 
 **Frases de activación:**
 - **"escúchame kiki"** — inicia grabación de micrófono en modo manos libres
 - **"listen to me kiki"** — variante en inglés (ambas frases detectadas por modelo VAD+Whisper híbrido)
 
+**Sonidos de confirmación (Fase 3.6):**
+- **Glass** — frase de activación detectada (inicio de sesión)
+- **Tink** — inicio de captura de audio (aún escuchando)
+- **Pop** — texto insertado en ambos modos (hotkey y manos libres)
+- **Bottle** — fin de sesión de manos libres
+
+Todos los sonidos se pueden desactivar en **Ajustes → General → Sonidos**.
+
+**Indicador de estado:** Cuando manos libres está activo, el ícono 🎤 en la barra de menús muestra un **punto de estado integrado bajo el símbolo**, indicando que el micrófono está monitoreando (ambigüedad visual cero respecto a antes).
+
 **Flujo de dictado (sesión continua):** la frase de activación abre una sesión de dictado que queda armada entre utterances — no hace falta repetirla para cada frase que quieras dictar.
-1. Di la frase de activación → **chime** + "👂 Te escucho…" (HUD naranja con waveform animado)
+1. Di la frase de activación → **Glass** + "👂 Te escucho…" (HUD naranja con waveform animado)
 2. Dicta el texto (mientras el modo esté activo, el ícono del menú cambia a waveform)
-3. **Silencio de 1.5 segundos** → fin de la utterance, transcripción, refinado y pegado (mismo flujo que hotkey)
+3. **Silencio de 0.5 segundos** → fin de la utterance, transcripción, refinado y pegado (mismo flujo que hotkey); **Pop** suena al insertar
 4. Texto insertado donde esté el cursor, y el HUD vuelve a "👂 Te escucho…" — la sesión sigue armada, lista para la siguiente utterance sin repetir la frase
-5. La sesión termina con **Esc**, apagando el toggle de manos libres, tras **45 segundos de silencio** sin nueva utterance, o usando el **dictado por tecla (Fn)** — el hotkey toma control explícito del micrófono (privacidad primero: una acción manual manda sobre la sesión manos-libres) y termina la sesión; vuelve a decir la frase para reabrirla
+5. La sesión termina con **Esc**, apagando el toggle de manos libres, tras **45 segundos de silencio** sin nueva utterance (**Bottle** suena), o usando el **dictado por tecla (Fn)** — el hotkey toma control explícito del micrófono (privacidad primero: una acción manual manda sobre la sesión manos-libres) y termina la sesión; vuelve a decir la frase para reabrirla
 
 Nota sobre timeouts: si dices la frase y no dictas nada después, el desarmado es más rápido (**8 segundos**) que el de silencio entre utterances dentro de una sesión ya en marcha (**45 segundos**) — evita quedarte "armado" indefinidamente por una frase suelta, sin cortar de golpe una sesión de dictado real mientras piensas la siguiente frase.
 
@@ -123,9 +133,14 @@ Nota sobre timeouts: si dices la frase y no dictas nada después, el desarmado e
 - **Ambientes muy ruidosos:** pueden disparar segmentos de grabación falsos si el umbral de RMS (energy threshold, default `0.008`) se cruza. En v1 usamos un umbral fijo; umbral adaptativo está en backlog. El log incluye diagnóstico de calibración (`kiki wake: pico RMS últimos 10s: ...`) durante las primeras ventanas de 10s tras cada arranque de manos libres, útil para ajustar el umbral al micrófono real del usuario.
 - **"Listo" como palabra de cierre:** la spec lo menciona (§3) como forma alternativa de terminar dictado; **no implementado en v1** — en backlog junto con otras mejoras de UX.
 
-## Personalización (Fase 3)
+## Personalización (Fase 3, rediseñada en 3.6)
 
-**Ajustes desde el menú:** Menú 🎤 → "Ajustes…" (Cmd+,) abre la ventana de configuración con 4 pestañas.
+**Ajustes desde el menú:** Menú 🎤 → "Ajustes…" (Cmd+,) abre la ventana de configuración con una **barra lateral con 5 secciones** (Fase 3.6):
+1. **General** — toggle de Sonidos (Glass, Tink, Pop, Bottle), indicador de estado manos libres
+2. **Diccionario** — términos personalizados (nombres, palabras técnicas, neologismos)
+3. **Snippets** — macros y atajos de expansión
+4. **Historial** — últimos 200 dictados con refresco en vivo y fechas relativas
+5. **Acerca de** — versión, créditos, enlaces
 
 **Diccionario personal:**
 - Añade términos propios (nombres, palabras técnicas, neologismos) que mejoran la precisión de Whisper.
@@ -139,8 +154,10 @@ Nota sobre timeouts: si dices la frase y no dictas nada después, el desarmado e
 - Cero latencia: la expansión es instantánea, no requiere IA.
 - Ej: trigger "firma corta" (tal como lo dirías en voz alta) → plantilla "Saludos, Ana" (sin refinado, listo en ms).
 
-**Historial:**
+**Historial (mejorado en 3.6):**
 - Últimos 200 dictados grabados: cada fila muestra `[crudo: texto de Whisper] [final: texto después de refinado]`.
+- **Refresco en vivo** — se actualiza automáticamente al completarse cada dictado (sin necesidad de cambiar de pestaña).
+- **Fechas relativas** — "hace 2 minutos", "hace 1 hora", etc., en lugar de timestamps absolutos.
 - Botón copiar por fila (copia el campo final).
 - Botón "Borrar todo" (limpia el historial; no se puede deshacer).
 - 100% local en JSON — nunca sale del Mac.
@@ -179,6 +196,13 @@ Nota sobre timeouts: si dices la frase y no dictas nada después, el desarmado e
 - ✓ Historial local (cap 200, copyable, clearable, JSON persistente)
 - ✓ Settings UI con 4 pestañas (Diccionario, Snippets, Historial, General)
 - ✓ Persistencia JSON atómico en Application Support
+
+**Fase 3.6 implementada (UX polish — sound cues & redesigned settings):**
+- ✓ 4 sonidos de confirmación (Glass, Tink, Pop, Bottle) con toggle en Settings → General
+- ✓ Atajo global ⌥⌘K para alternar manos libres desde cualquier app (confirmación visual en HUD)
+- ✓ Indicador de estado en el ícono 🎤 (punto integrado cuando manos libres está activo — fin del emoji 👂)
+- ✓ Latencia de end-silence mejorada: 0.5s (antes 0.7s) para detección más rápida entre utterances
+- ✓ Settings rediseñado: sidebar con 5 secciones (General, Diccionario, Snippets, Historial, Acerca de); historial con refresco en vivo y fechas relativas
 
 **Fase 4 implementada (hardening quick-wins + empaquetado, en curso):**
 - ✓ Sidecar `.corrupt` en `JSONStore`: un JSON corrupto se respalda (renombrado, no borrado) antes de reiniciar el store vacío — recuperable para forense
