@@ -220,7 +220,7 @@ final class DictationControllerTests: XCTestCase {
         let context = MockContext()
         controller = DictationController(
             recorder: recorder, transcriber: transcriber, inserter: inserter,
-            refiner: refiner, context: context)
+            refiner: refiner, context: context, minRefinableLength: 0)
         controller.delegate = delegate
 
         transcriber.textToReturn = "hello world"
@@ -237,7 +237,7 @@ final class DictationControllerTests: XCTestCase {
         context.profileToReturn = .code
         controller = DictationController(
             recorder: recorder, transcriber: transcriber, inserter: inserter,
-            refiner: refiner, context: context)
+            refiner: refiner, context: context, minRefinableLength: 0)
         controller.delegate = delegate
 
         transcriber.textToReturn = "raw text"
@@ -252,7 +252,7 @@ final class DictationControllerTests: XCTestCase {
         refiner.textToReturn = "refined"
         controller = DictationController(
             recorder: recorder, transcriber: transcriber, inserter: inserter,
-            refiner: refiner, context: nil)
+            refiner: refiner, context: nil, minRefinableLength: 0)
         controller.delegate = delegate
 
         transcriber.textToReturn = "raw text"
@@ -268,7 +268,7 @@ final class DictationControllerTests: XCTestCase {
         let context = MockContext()
         controller = DictationController(
             recorder: recorder, transcriber: transcriber, inserter: inserter,
-            refiner: refiner, context: context)
+            refiner: refiner, context: context, minRefinableLength: 0)
         controller.delegate = delegate
 
         transcriber.textToReturn = "crudo"
@@ -287,7 +287,7 @@ final class DictationControllerTests: XCTestCase {
         let context = MockContext()
         controller = DictationController(
             recorder: recorder, transcriber: transcriber, inserter: inserter,
-            refiner: refiner, context: context, refineTimeout: 0.1)
+            refiner: refiner, context: context, refineTimeout: 0.1, minRefinableLength: 0)
         controller.delegate = delegate
 
         transcriber.textToReturn = "crudo"
@@ -305,7 +305,7 @@ final class DictationControllerTests: XCTestCase {
         let context = MockContext()
         controller = DictationController(
             recorder: recorder, transcriber: transcriber, inserter: inserter,
-            refiner: refiner, context: context)
+            refiner: refiner, context: context, minRefinableLength: 0)
         controller.delegate = delegate
 
         transcriber.textToReturn = "crudo"
@@ -326,7 +326,7 @@ final class DictationControllerTests: XCTestCase {
         let context = MockContext()
         controller = DictationController(
             recorder: recorder, transcriber: transcriber, inserter: inserter,
-            refiner: refiner, context: context)
+            refiner: refiner, context: context, minRefinableLength: 0)
         controller.delegate = delegate
 
         transcriber.textToReturn = "crudo"
@@ -349,7 +349,7 @@ final class DictationControllerTests: XCTestCase {
         let context = MockContext()
         controller = DictationController(
             recorder: recorder, transcriber: transcriber, inserter: inserter,
-            refiner: refiner, context: context)
+            refiner: refiner, context: context, minRefinableLength: 0)
         controller.delegate = delegate
 
         transcriber.textToReturn = raw
@@ -401,7 +401,7 @@ final class DictationControllerTests: XCTestCase {
         let context = MockContext()
         controller = DictationController(
             recorder: recorder, transcriber: transcriber, inserter: inserter,
-            refiner: refiner, context: context)
+            refiner: refiner, context: context, minRefinableLength: 0)
         controller.delegate = delegate
 
         await controller.processTranscript("hello world")
@@ -418,7 +418,7 @@ final class DictationControllerTests: XCTestCase {
         let context = MockContext()
         controller = DictationController(
             recorder: recorder, transcriber: transcriber, inserter: inserter,
-            refiner: refiner, context: context)
+            refiner: refiner, context: context, minRefinableLength: 0)
         controller.delegate = delegate
 
         let statesBefore = delegate.states.count
@@ -506,7 +506,7 @@ final class DictationControllerTests: XCTestCase {
         controller = DictationController(
             recorder: recorder, transcriber: transcriber, inserter: inserter,
             refiner: refiner, context: context,
-            snippets: snippets, history: nil)
+            snippets: snippets, history: nil, minRefinableLength: 0)
         controller.delegate = delegate
 
         transcriber.textToReturn = "world"
@@ -532,7 +532,7 @@ final class DictationControllerTests: XCTestCase {
         controller = DictationController(
             recorder: recorder, transcriber: transcriber, inserter: inserter,
             refiner: refiner, context: context,
-            snippets: nil, history: history)
+            snippets: nil, history: history, minRefinableLength: 0)
         controller.delegate = delegate
 
         transcriber.textToReturn = "raw text"
@@ -557,7 +557,7 @@ final class DictationControllerTests: XCTestCase {
         controller = DictationController(
             recorder: recorder, transcriber: transcriber, inserter: inserter,
             refiner: refiner, context: context,
-            snippets: nil, history: history)
+            snippets: nil, history: history, minRefinableLength: 0)
         controller.delegate = delegate
 
         transcriber.textToReturn = "crudo"
@@ -604,7 +604,7 @@ final class DictationControllerTests: XCTestCase {
         controller = DictationController(
             recorder: recorder, transcriber: transcriber, inserter: inserter,
             refiner: refiner, context: context,
-            snippets: nil, history: nil)
+            snippets: nil, history: nil, minRefinableLength: 0)
         controller.delegate = delegate
 
         transcriber.textToReturn = "test"
@@ -664,5 +664,50 @@ final class DictationControllerTests: XCTestCase {
         XCTAssertTrue(history.recordings.isEmpty)
         XCTAssertEqual(controller.state, .idle)
         XCTAssertFalse(delegate.errors.isEmpty)
+    }
+
+    // MARK: - Short-Text Refinement Skip (field bug: LLM damages tiny fragments)
+    //
+    // Field evidence: "Necesito que transcribas" (24 chars) came back from the
+    // refiner as "transcribas"; "¿Qué escuchas?" came back as "¿Qué escucha?".
+    // Short fragments have no muletillas ("um", "eh") for the LLM to clean up,
+    // so a small model asked to "refine" them tends to damage them instead.
+    // `minRefinableLength` (default 25) skips refinement entirely below that
+    // length and inserts the raw transcript.
+
+    func test_shortTextSkipsRefiner() async {
+        let refiner = MockRefiner()
+        refiner.textToReturn = "should never be used"
+        let context = MockContext()
+        controller = DictationController(
+            recorder: recorder, transcriber: transcriber, inserter: inserter,
+            refiner: refiner, context: context)
+        controller.delegate = delegate
+
+        let shortText = String(repeating: "a", count: 24) // < minRefinableLength (25)
+        transcriber.textToReturn = shortText
+        controller.hotkeyPressed()
+        await controller.hotkeyReleased()
+
+        XCTAssertTrue(refiner.receivedTexts.isEmpty, "Refiner must not be invoked for inputs shorter than minRefinableLength")
+        XCTAssertEqual(inserter.inserted, [shortText])
+    }
+
+    func test_boundaryLengthTextInvokesRefiner() async {
+        let refiner = MockRefiner()
+        refiner.textToReturn = "refined boundary text"
+        let context = MockContext()
+        controller = DictationController(
+            recorder: recorder, transcriber: transcriber, inserter: inserter,
+            refiner: refiner, context: context)
+        controller.delegate = delegate
+
+        let boundaryText = String(repeating: "a", count: 25) // == minRefinableLength
+        transcriber.textToReturn = boundaryText
+        controller.hotkeyPressed()
+        await controller.hotkeyReleased()
+
+        XCTAssertEqual(refiner.receivedTexts, [boundaryText], "Refiner must be invoked at exactly minRefinableLength")
+        XCTAssertEqual(inserter.inserted, ["refined boundary text"])
     }
 }

@@ -33,6 +33,7 @@ public final class DictationController {
     private let sampleRate: Double
     private let snippets: SnippetExpanding?
     private let history: HistoryRecording?
+    private let minRefinableLength: Int
 
     public init(
         recorder: AudioRecording,
@@ -44,7 +45,8 @@ public final class DictationController {
         context: ContextProviding? = nil,
         refineTimeout: TimeInterval = 5,
         snippets: SnippetExpanding? = nil,
-        history: HistoryRecording? = nil
+        history: HistoryRecording? = nil,
+        minRefinableLength: Int = 25
     ) {
         self.recorder = recorder
         self.transcriber = transcriber
@@ -56,6 +58,7 @@ public final class DictationController {
         self.sampleRate = sampleRate
         self.snippets = snippets
         self.history = history
+        self.minRefinableLength = minRefinableLength
     }
 
     public func hotkeyPressed() {
@@ -163,6 +166,15 @@ public final class DictationController {
 
     private func refineOrFallback(_ text: String) async -> String {
         guard let refiner else { return text }
+        // Fragmentos cortos no tienen muletillas que limpiar y el LLM
+        // pequeño los daña — evidencia de campo: "Necesito que transcribas"
+        // (24 chars) volvió "transcribas"; "¿Qué escuchas?" volvió
+        // "¿Qué escucha?". Por debajo del umbral, el refinado hace más daño
+        // que bien: se salta directo al texto crudo.
+        guard text.count >= minRefinableLength else {
+            KikiLog.log("kiki core: texto corto — sin refinado")
+            return text
+        }
         let profile = context?.currentProfile() ?? .neutral
         do {
             let started = Date()
