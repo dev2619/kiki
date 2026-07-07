@@ -138,9 +138,25 @@ public final class WakeListener: @unchecked Sendable {
     private let armedConfig: SegmenterConfig
     private var segmenter: SpeechSegmenter
 
-    /// Solo una transcripción en vuelo a la vez; segmentos que llegan mientras
-    /// hay una pendiente se descartan (ver `handleListeningSegment`).
+    /// Solo una transcripción en vuelo a la vez; un segmento que llega
+    /// mientras hay una pendiente ya NO se descarta (bug de campo: la frase
+    /// de activación completa podía llegar justo durante el check en vuelo
+    /// de un segmento anterior y perderse — ver `segmento descartado
+    /// (transcripción en curso)` en el log). En su lugar se guarda en
+    /// `pendingSegment` y se encola para chequeo — ver `handleListeningSegment`.
     private var isTranscribing = false
+    /// Segmento en espera mientras `isTranscribing` está en vuelo. Cola de
+    /// tamaño MÁXIMO 1: "el más reciente gana" — si llega un segundo
+    /// segmento antes de que el primero pendiente alcance a chequearse, el
+    /// primero se descarta a favor del segundo (más probable que contenga la
+    /// frase completa/reciente) y se loggea el reemplazo. Se chequea en
+    /// cuanto termina el check en vuelo (mismo flujo que un segmento
+    /// normal, ver el `queue.async` al final de `handleListeningSegment`).
+    /// Se limpia en cualquier transición que invalide la sesión de
+    /// `.listening` vigente (`arm()`, `stop()`, `resetSessionCounters()` —
+    /// bump de `session` en `start()`/`resumeArmed()`) para que un segmento
+    /// de un régimen o sesión anteriores nunca se cuele en el siguiente.
+    private var pendingSegment: [Float]?
     private var transcriptionTask: Task<Void, Never>?
     private var disarmTask: Task<Void, Never>?
     /// Incrementado en cada start()/stop(). Las tareas de transcripción en
@@ -242,15 +258,29 @@ public final class WakeListener: @unchecked Sendable {
     public init(transcriber: Transcribing, speechRMSThreshold: Float = WakeListener.defaultSpeechRMSThreshold) {
         self.transcriber = transcriber
         self.speechRMSThreshold = speechRMSThreshold
+        // adaptiveThreshold: true — this is the one caller that opts in (see
+        // `SegmenterConfig.adaptiveThreshold` doc). Field data showed the
+        // fixed threshold failing in both directions for real microphones:
+        // a loud room pins every chunk above it forever (segments always hit
+        // maxSegmentDuration and get discarded before the wake phrase is
+        // ever checked), while a quiet room fragments real speech below it
+        // ("corto" discards). Both `listeningConfig` and `armedConfig` opt
+        // in so the learned floor carries the same intent across regimes;
+        // each keeps its own `SpeechSegmenter` instance (see `segmenter`
+        // reassignments below) so each has its own independently-learned
+        // floor rather than sharing state across regimes with very
+        // different silence/duration tunables.
         self.listeningConfig = SegmenterConfig(
             speechRMSThreshold: speechRMSThreshold,
             endSilence: Self.listeningEndSilence,
             minSpeechDuration: Self.listeningMinSpeechDuration,
-            maxSegmentDuration: 6)
+            maxSegmentDuration: 6,
+            adaptiveThreshold: true)
         self.armedConfig = SegmenterConfig(
             speechRMSThreshold: speechRMSThreshold,
             endSilence: 1.5,
-            maxSegmentDuration: 30)
+            maxSegmentDuration: 30,
+            adaptiveThreshold: true)
         self.segmenter = SpeechSegmenter(config: self.listeningConfig)
     }
 
@@ -307,6 +337,7 @@ public final class WakeListener: @unchecked Sendable {
         dispatchPrecondition(condition: .onQueue(queue))
         session += 1
         isTranscribing = false
+        pendingSegment = nil
         accumulatedSampleCount = 0
         suppressUntilSampleCount = nil
         calibrationPeakRMS = 0
@@ -345,6 +376,7 @@ public final class WakeListener: @unchecked Sendable {
             transcriptionTask?.cancel()
             transcriptionTask = nil
             isTranscribing = false
+            pendingSegment = nil
             session += 1
             // Ver doc de `notificationEpoch`: invalida cualquier notificación
             // al delegate que ya haya sido despachada (Task@MainActor
@@ -370,7 +402,7 @@ public final class WakeListener: @unchecked Sendable {
         guard calibrationWindowsLogged < Self.calibrationMaxWindows,
               calibrationWindowSampleCount > 0 else { return }
         let seconds = Double(calibrationWindowSampleCount) / Self.sampleRate
-        KikiLog.log("kiki wake: pico RMS ventana parcial (\(String(format: "%.1f", seconds))s): \(String(format: "%.4f", calibrationPeakRMS))")
+        KikiLog.log("kiki wake: pico RMS ventana parcial (\(String(format: "%.1f", seconds))s): \(String(format: "%.4f", calibrationPeakRMS)) (umbral efectivo \(String(format: "%.4f", segmenter.effectiveThreshold)))")
         calibrationPeakRMS = 0
         calibrationWindowSampleCount = 0
     }
@@ -449,7 +481,13 @@ public final class WakeListener: @unchecked Sendable {
         let windowSamples = Int(Self.calibrationWindowDuration * Self.sampleRate)
         guard calibrationWindowSampleCount >= windowSamples else { return }
         calibrationWindowsLogged += 1
-        KikiLog.log("kiki wake: pico RMS últimos 10s: \(String(format: "%.4f", calibrationPeakRMS))")
+        // `segmenter.effectiveThreshold` (ver `SpeechSegmenter`, adaptativo
+        // desde este `WakeListener` — ver `init`): con umbral fijo esto
+        // habría sido siempre el mismo número que `speechRMSThreshold`, sin
+        // valor diagnóstico. Con el umbral adaptativo, ver cuánto se movió
+        // respecto al pico de RMS es exactamente lo que permite confirmar en
+        // campo que el aprendizaje del piso de ruido está funcionando.
+        KikiLog.log("kiki wake: pico RMS últimos 10s: \(String(format: "%.4f", calibrationPeakRMS)) (umbral efectivo \(String(format: "%.4f", segmenter.effectiveThreshold)))")
         calibrationPeakRMS = 0
         calibrationWindowSampleCount = 0
     }
@@ -490,8 +528,19 @@ public final class WakeListener: @unchecked Sendable {
 
     private func handleListeningSegment(_ samples: [Float]) {
         guard !isTranscribing else {
+            // Ya no se descarta (bug de campo: la frase de activación podía
+            // llegar completa justo durante el check en vuelo de un
+            // segmento anterior y perderse sin más). Se guarda como
+            // `pendingSegment` — cola de tamaño máximo 1, el más reciente
+            // gana — y se chequea en cuanto termine el check en vuelo (ver
+            // el bloque `queue.async` de la Task de abajo).
             let seconds = Double(samples.count) / Self.sampleRate
-            KikiLog.log("kiki wake: segmento descartado (transcripción en curso, \(String(format: "%.1f", seconds))s)")
+            if pendingSegment != nil {
+                KikiLog.log("kiki wake: segmento pendiente reemplazado")
+            } else {
+                KikiLog.log("kiki wake: segmento encolado (transcripción en curso, \(String(format: "%.1f", seconds))s)")
+            }
+            pendingSegment = samples
             return
         }
         isTranscribing = true
@@ -532,8 +581,21 @@ public final class WakeListener: @unchecked Sendable {
                 // `applyMatch`), solo duraciones y si matcheó o no.
                 let matched = text.flatMap(WakePhraseMatcher.match) != nil
                 KikiLog.log("kiki wake: check — segmento \(String(format: "%.1f", segmentSeconds))s, transcripción \(String(format: "%.1f", transcribeSeconds))s, match \(matched ? "sí" : "no")")
-                guard self._state == .listening, let text else { return }
-                self.applyMatch(text, sampleCount: samples.count)
+                if self._state == .listening, let text {
+                    self.applyMatch(text, sampleCount: samples.count)
+                }
+                // Un segmento pudo haber quedado pendiente (ver
+                // `handleListeningSegment`) mientras este check estaba en
+                // vuelo. `applyMatch` puede haber armado (`arm()`), que ya
+                // limpia `pendingSegment` por no aplicar al régimen armado —
+                // así que llegar aquí con uno todavía presente implica que
+                // seguimos en `.listening` y corresponde chequearlo a
+                // continuación, mismo flujo que un segmento recién llegado
+                // (mismo log de desglose de arriba en su propia iteración).
+                if let pending = self.pendingSegment {
+                    self.pendingSegment = nil
+                    self.handleListeningSegment(pending)
+                }
             }
         }
     }
@@ -567,6 +629,10 @@ public final class WakeListener: @unchecked Sendable {
         // Frase nueva → arme inicial de la sesión: régimen de timeout corto
         // (8s) hasta la primera captura entregada.
         hasCapturedInSession = false
+        // Cualquier segmento de `.listening` que siguiera pendiente de
+        // chequeo ya no aplica: el régimen armado usa `armedConfig`/otro
+        // segmenter y ese audio no es dictado dirigido a kiki.
+        pendingSegment = nil
         segmenter = SpeechSegmenter(config: armedConfig)
         // Ver doc de postArmSuppression: el chime que dispara wakeListenerDidArm
         // (más abajo) no debe colarse en el segmenter recién armado.
