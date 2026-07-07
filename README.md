@@ -1,9 +1,30 @@
-# kiki
+<p align="center">
+  <img src="docs/assets/kiki-logo.png" alt="kiki" width="200" height="200">
+</p>
 
-Dictado por voz con IA, **100% local**, para macOS. Mantén **Fn**, habla, suelta — el texto aparece donde esté tu cursor, en cualquier app. Tu voz nunca sale de tu Mac.
+<h1 align="center">kiki</h1>
 
-> Fase actual: **3 — personalización** (Ajustes desde el menú: diccionario personal, snippets, historial local, persistencia JSON en Application Support).
-> Spec completo: [`docs/superpowers/specs/2026-07-06-kiki-design.md`](docs/superpowers/specs/2026-07-06-kiki-design.md)
+<p align="center">Dictado por voz con IA, <strong>100% local</strong>, para macOS.<br>
+Mantén <strong>Fn</strong> (o di <em>"escúchame kiki"</em>), habla, suelta — el texto aparece donde esté tu cursor, en cualquier app. Tu voz nunca sale de tu Mac.</p>
+
+---
+
+> **Estado:** MVP completo (Fases 1–3 + pulido 3.6/3.7). Dictado por tecla y manos libres, refinado con IA local, modo traducción es⇄en, diccionario/snippets/historial, y atajos de teclado estándar.
+> Spec completo: [`docs/superpowers/specs/2026-07-06-kiki-design.md`](docs/superpowers/specs/2026-07-06-kiki-design.md) · Marca: [`docs/brand/`](docs/brand/)
+
+## Funcionalidades
+
+| Función | Cómo |
+|---|---|
+| **Dictado por tecla** | Mantén **Fn**, habla, suelta → texto refinado donde esté el cursor |
+| **Manos libres** | Di *"escúchame kiki"* / *"listen to me kiki"* → dicta de corrido; o **⌥⌘K** para dictar al instante sin frase |
+| **Refinado con IA local** | Limpia muletillas, puntúa y adapta el tono a la app activa (Slack/VS Code/Mail…) |
+| **Modo traducción** | Toggle "Traducir al dictar": habla en un idioma, escribe en el otro (es⇄en) |
+| **Diccionario personal** | Reconoce y escribe tus términos exactos (inyectado en Whisper y el LLM) |
+| **Snippets de voz** | Di un trigger → inserta una plantilla, sin pasar por la IA |
+| **Historial local** | Últimos 200 dictados, copiables, borrables — nunca salen del Mac |
+| **Confirmación sonora** | Cues de audio: escuchando / capturando / insertado / desactivado |
+| **Atajos estándar** | Cmd+Q/W/M y Cmd+C/V/X/A/Z en los campos de Ajustes |
 
 ## Requisitos
 
