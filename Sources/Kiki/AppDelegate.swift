@@ -11,6 +11,7 @@ import KikiWake
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private static let wakeEnabledKey = "kiki.wakeEnabled"
     private static let wakeMenuItemTag = 2
+    private static let translateMenuItemTag = 3
     /// Umbral RMS de habla para `WakeListener`, calibrable en campo sin
     /// rebuild — ver `WakeListener.init`. Ejemplo de uso en un mic marginal:
     /// `defaults write com.dev2619.kiki kiki.wakeRMSThreshold 0.004`.
@@ -82,6 +83,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             onToggleWake: { [weak self] in self?.toggleWake() })
         settingsWindowController = SettingsWindowController(viewModel: settingsViewModel)
 
+        // Mantiene el checkmark del ítem de menú "Traducir al dictar"
+        // sincronizado si el toggle se cambia desde Ajustes en vez del menú
+        // (ver doc de `syncTranslateMenuCheckmark`). `statusItem` todavía no
+        // existe en este punto — el handler solo se dispara tras
+        // `setUpStatusItem()`, así que el `?.` de `syncTranslateMenuCheckmark`
+        // es suficiente, no hace falta guardar/quitar este observer (vive
+        // todo el ciclo de vida del proceso, igual que `AppDelegate`).
+        NotificationCenter.default.addObserver(
+            forName: .kikiTranslateEnabledChanged,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.syncTranslateMenuCheckmark() }
+        }
+
         controller = DictationController(
             recorder: recorder,
             transcriber: transcriber,
@@ -89,7 +105,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             refiner: refiner,
             context: appContext,
             snippets: snippetAdapter,
-            history: historyAdapter)
+            history: historyAdapter,
+            // Fase: fidelidad de idioma. `transcriber` conforma también
+            // `LanguageDetecting` (ver `WhisperTranscriber`) — el mismo
+            // actor que ya se inyecta como `Transcribing` se reinyecta aquí
+            // para que el controller pueda leer, tras cada transcripción, el
+            // idioma que Whisper detectó y fijárselo al refinador en vez de
+            // dejarlo a la deriva (bug de campo: inglés mistraducido/
+            // alucinado por el refinador de 3B).
+            languageProvider: transcriber,
+            // Fix 2 (modo traducción, opt-in): se lee `UserDefaults`
+            // directamente en vez de empujar el valor a través de un
+            // adapter/provider — a diferencia del diccionario personal, este
+            // flag no tiene efectos secundarios de ciclo de vida (no arranca/
+            // para ningún engine de audio como `wakeEnabled`), así que un
+            // closure que relee `settingsViewModel.translateEnabled` en cada
+            // refinado (siempre en MainActor, igual que este closure) es
+            // suficiente y evita otro protocolo/adapter.
+            translateEnabled: { [weak self] in self?.settingsViewModel.translateEnabled ?? false })
         controller.delegate = self
 
         wakeListener = WakeListener(transcriber: transcriber, speechRMSThreshold: Self.effectiveWakeRMSThreshold())
@@ -170,6 +203,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         wakeItem.tag = Self.wakeMenuItemTag
         wakeItem.state = wakeEnabled ? .on : .off
         menu.addItem(wakeItem)
+
+        let translateItem = NSMenuItem(
+            title: "Traducir al dictar",
+            action: #selector(toggleTranslate),
+            keyEquivalent: "")
+        translateItem.target = self
+        translateItem.tag = Self.translateMenuItemTag
+        // Lee `UserDefaults` directamente en vez de `settingsViewModel.translateEnabled`:
+        // `setUpStatusItem()` corre sin `@MainActor` (se invoca síncrono
+        // desde `applicationDidFinishLaunching`, que tampoco lo es — mismo
+        // patrón que el resto del arranque, que solo toca estado
+        // MainActor-isolated envuelto en `Task { @MainActor in ... }`), y
+        // `SettingsViewModel` sí es `@MainActor`. `UserDefaults` no está
+        // aislado a ningún actor, así que leerlo aquí es seguro y evita
+        // reordenar el arranque solo por esto.
+        translateItem.state = UserDefaults.standard.bool(forKey: SettingsViewModel.translateEnabledDefaultsKey) ? .on : .off
+        menu.addItem(translateItem)
         menu.addItem(.separator())
 
         menu.addItem(NSMenuItem(
@@ -205,6 +255,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @MainActor @objc private func openSettings() {
         settingsWindowController.show()
+    }
+
+    /// Alterna "Traducir al dictar" desde el ítem de menú — delega en
+    /// `settingsViewModel.translateEnabled` (única fuente de verdad,
+    /// persistida vía su `didSet`) en vez de mantener un booleano paralelo,
+    /// así el menú y Ajustes nunca pueden desincronizarse. El checkmark se
+    /// actualiza aquí mismo Y desde `syncTranslateMenuCheckmark()` (llamado
+    /// vía `.kikiTranslateEnabledChanged`) para cubrir también el caso en
+    /// que el usuario cambia el toggle desde la ventana de Ajustes.
+    @MainActor @objc private func toggleTranslate() {
+        settingsViewModel.translateEnabled.toggle()
+    }
+
+    @MainActor private func syncTranslateMenuCheckmark() {
+        // `statusItem` es un IUO fijado en `setUpStatusItem()` — guard
+        // defensivo en vez de forzar el desenvuelto, por si esta notificación
+        // llegara antes de que el menú exista (no debería pasar en la
+        // práctica: solo se postea al mutar `settingsViewModel.translateEnabled`,
+        // algo que solo el usuario puede disparar ya con la app corriendo).
+        guard let statusItem else { return }
+        statusItem.menu?.item(withTag: Self.translateMenuItemTag)?.state =
+            settingsViewModel.translateEnabled ? .on : .off
     }
 
     @MainActor @objc private func toggleWake() {
@@ -373,6 +445,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
 extension AppDelegate: DictationControllerDelegate {
     func dictationStateDidChange(_ state: DictationState) {
+        // Fase: fidelidad de idioma / Fix 2. Se fija ANTES de `hud.show`
+        // (que es lo que efectivamente pone la pill en pantalla) para que la
+        // primera pintura de "Procesando…"/"Traduciendo…" ya sea correcta —
+        // solo importa al ENTRAR a `.processing`, pero fijarlo siempre es
+        // inocuo (mismo valor durante `.recording`/`.idle`, donde `HUDView`
+        // ni lo lee).
+        if state == .processing {
+            hud.setTranslating(settingsViewModel.translateEnabled)
+        }
         hud.show(state: state)
 
         // Belt-and-suspenders contra `resumeAsArmed` stale: `.recording`

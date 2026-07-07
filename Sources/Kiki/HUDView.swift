@@ -9,6 +9,12 @@ final class HUDModel: ObservableObject {
     /// Tiene prioridad de render sobre `state`/`armed` mientras no sea nil —
     /// ver `HUDController.showTransient`.
     @Published var transientText: String?
+    /// `true` cuando el modo "Traducir al dictar" está activo — cambia el
+    /// texto de la pill de "Procesando…" a "Traduciendo…" mientras
+    /// `state == .processing`, para que el usuario sepa que ese dictado se
+    /// está traduciendo, no solo limpiando. `AppDelegate` lo fija justo al
+    /// entrar a `.processing` (ver `HUDController.setTranslating`).
+    @Published var translating: Bool = false
 }
 
 struct HUDView: View {
@@ -30,7 +36,7 @@ struct HUDView: View {
                 case .processing:
                     ProgressView()
                         .controlSize(.small)
-                    Text("Procesando…")
+                    Text(model.translating ? "Traduciendo…" : "Procesando…")
                 case .idle:
                     if model.armed {
                         Text("👂 Te escucho…")

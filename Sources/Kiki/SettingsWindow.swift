@@ -177,6 +177,12 @@ private struct GeneralSectionView: View {
                 Text("Actívalo y di \"escúchame kiki\" para dictar sin tocar nada, o alterna el modo en cualquier momento con ⌥⌘K. Los sonidos de confirmación marcan cuándo kiki empieza a escuchar, detecta tu voz, inserta el texto o se desactiva — sin que tengas que mirar la pantalla.")
             }
 
+            Section {
+                Toggle("Traducir al dictar", isOn: $viewModel.translateEnabled)
+            } footer: {
+                Text("Con esto activado, kiki traduce cada dictado al otro idioma (español↔inglés) en vez de solo limpiarlo. Con esto desactivado (por defecto), kiki nunca cambia el idioma en el que dictaste.")
+            }
+
             Section("Dictado") {
                 LabeledContent("Atajo", value: viewModel.hotkeyDescription)
                 LabeledContent("Frases de activación", value: viewModel.wakePhrasesDescription)

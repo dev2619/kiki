@@ -11,6 +11,13 @@ import KikiWake
 /// vivo sin que el usuario tenga que cerrar/reabrir la ventana.
 extension Notification.Name {
     static let kikiDictationInserted = Notification.Name("kiki.dictationInserted")
+
+    /// Posteada por `SettingsViewModel.translateEnabled.didSet` (Fase:
+    /// fidelidad de idioma / Fix 2) cada vez que el toggle "Traducir al
+    /// dictar" cambia desde Ajustes — permite que `AppDelegate` mantenga el
+    /// checkmark del ítem de menú equivalente sincronizado sin que
+    /// `SettingsViewModel` conozca nada sobre `NSMenuItem`.
+    static let kikiTranslateEnabledChanged = Notification.Name("kiki.translateEnabledChanged")
 }
 
 /// Secciones del sidebar de Ajustes (`NavigationSplitView`, Fase 3.6). El
@@ -77,6 +84,32 @@ final class SettingsViewModel: ObservableObject {
         }
     }
 
+    /// Toggle "Traducir al dictar" (Ajustes → General, Fase: fidelidad de
+    /// idioma / Fix 2). Default OFF (`bool(forKey:)` de `UserDefaults`
+    /// devuelve `false` cuando la clave no existe, así que no hace falta el
+    /// chequeo `object(forKey:) != nil` que sí usa `soundCuesEnabled`, cuyo
+    /// default es `true`). Espejo directo de `translateEnabledDefaultsKey` —
+    /// el `didSet` es la única fuente de escritura a `UserDefaults` desde la
+    /// UI; `AppDelegate` lee la misma clave directamente al refinar (closure
+    /// `translateEnabled` pasado a `DictationController`) y al fijar el
+    /// modo del HUD, así que no hace falta ninguna notificación cruzada —
+    /// mismo patrón que `soundCuesEnabled`. `AppDelegate` sí observa
+    /// `.kikiTranslateEnabledChanged` para mantener el checkmark del ítem de
+    /// menú "Traducir al dictar" sincronizado si el toggle se cambia desde
+    /// Ajustes en vez del menú.
+    @Published var translateEnabled: Bool {
+        didSet {
+            UserDefaults.standard.set(translateEnabled, forKey: Self.translateEnabledDefaultsKey)
+            NotificationCenter.default.post(name: .kikiTranslateEnabledChanged, object: nil)
+        }
+    }
+
+    /// `nonisolated` a propósito: es un `String` inmutable (Sendable) y se
+    /// lee desde `AppDelegate.setUpStatusItem()`, que corre sin `@MainActor`
+    /// — sin este marcador, el acceso a un `static let` de una clase
+    /// `@MainActor` hereda su aislamiento y ese call site no compila (Swift 6).
+    nonisolated static let translateEnabledDefaultsKey = "kiki.translateEnabled"
+
     /// Sección seleccionada del sidebar, persistida en `UserDefaults` y
     /// restaurada la próxima vez que se abre Ajustes (Fase 3.6, Task 2).
     @Published var selectedSection: SettingsSection {
@@ -118,6 +151,7 @@ final class SettingsViewModel: ObservableObject {
         self.soundCuesEnabled = defaults.object(forKey: SoundCues.enabledDefaultsKey) != nil
             ? defaults.bool(forKey: SoundCues.enabledDefaultsKey)
             : true
+        self.translateEnabled = defaults.bool(forKey: Self.translateEnabledDefaultsKey)
         if let rawSection = defaults.string(forKey: Self.settingsSectionKey),
            let restored = SettingsSection(rawValue: rawSection) {
             self.selectedSection = restored

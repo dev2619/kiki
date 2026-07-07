@@ -56,6 +56,14 @@ final class HUDController {
         model.level = level
     }
 
+    /// Fija si la pill de "Procesando…" debe mostrarse como "Traduciendo…"
+    /// en el próximo/actual `.processing`. `AppDelegate` lo llama al leer
+    /// `kiki.translateEnabled` justo cuando el estado del dictado pasa a
+    /// `.processing` — ver `HUDView`/`HUDModel.translating`.
+    func setTranslating(_ on: Bool) {
+        model.translating = on
+    }
+
     func showArmed(_ on: Bool) {
         model.armed = on
         if on {
