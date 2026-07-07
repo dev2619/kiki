@@ -7,7 +7,7 @@ BIN := $(XCODE_PRODUCTS)/Kiki
 # el cache de compilación ANE/CoreML sobreviven. Fallback ad-hoc: make SIGN_ID=-
 SIGN_ID ?= kiki-dev
 
-.PHONY: build test bundle run clean
+.PHONY: build test bundle run clean dmg
 
 # El target Cmlx de mlx-swift compila shaders .metal a un default.metallib vía
 # el sistema de build de Xcode; el CLI de SwiftPM (`swift build`) no tiene esa
@@ -41,6 +41,18 @@ bundle: build
 
 run: bundle
 	open $(APP)
+
+# Empaquetado .dmg sin notarizar (Fase 4 — pendiente Apple Developer Program
+# para notarización). Gatekeeper bloqueará el primer lanzamiento en Macs
+# ajenos a este equipo; el usuario debe clic derecho → Abrir.
+dmg: bundle
+	rm -f build/kiki-*.dmg
+	mkdir -p build/dmg-root
+	cp -R $(APP) build/dmg-root/
+	ln -sf /Applications build/dmg-root/Applications
+	hdiutil create -volname "kiki" -srcfolder build/dmg-root -ov -format UDZO build/kiki-$$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' App/Info.plist).dmg
+	rm -rf build/dmg-root
+	@echo "DMG listo (sin notarizar — Gatekeeper pedirá clic derecho→Abrir en otros Macs)"
 
 clean:
 	rm -rf .build build

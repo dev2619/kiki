@@ -23,6 +23,16 @@ make bundle   # ensambla build/kiki.app (firma ad-hoc)
 make run      # abre la app
 ```
 
+## Distribución (Fase 4)
+
+```bash
+make dmg      # ensambla build/kiki-<version>.dmg (versión actual: 0.4.0)
+```
+
+`make dmg` genera un `.dmg` con `kiki.app` y un symlink a `/Applications` (arrástralo para instalar), vía `hdiutil` — sin dependencias externas.
+
+> **Gatekeeper:** el `.dmg` **no está notarizado** (requiere Apple Developer Program — pendiente). En un Mac distinto al de desarrollo, macOS bloqueará el primer lanzamiento; hay que hacer **clic derecho → Abrir** sobre `kiki.app` (una sola vez) para saltar el aviso de "desarrollador no identificado".
+
 Test de integración STT (descarga el modelo Whisper):
 
 ```bash
@@ -170,9 +180,14 @@ Nota sobre timeouts: si dices la frase y no dictas nada después, el desarmado e
 - ✓ Settings UI con 4 pestañas (Diccionario, Snippets, Historial, General)
 - ✓ Persistencia JSON atómico en Application Support
 
+**Fase 4 implementada (hardening quick-wins + empaquetado, en curso):**
+- ✓ Sidecar `.corrupt` en `JSONStore`: un JSON corrupto se respalda (renombrado, no borrado) antes de reiniciar el store vacío — recuperable para forense
+- ✓ Higiene de inputs en los stores: strings vacíos/solo-espacios se rechazan en `DictionaryStore.add` y `SnippetStore.add` (trigger o template vacío → no-op)
+- ✓ Dedupe de snippets con la misma normalización que el matching en runtime (lowercase + diacríticos + puntuación) — "café" y "cafe" ya no producen duplicados
+- ✓ Empaquetado `.dmg` (`make dmg`) — versión 0.4.0
+
 **Pendiente (Fase 4 — empaquetado y distribución):**
 - Onboarding guiado de permisos (micrófono, Accesibilidad)
-- Empaquetado .dmg con instalador
 - Notarización y hardened runtime (requiere Apple Developer Program)
 - Auto-update mechanism
 
