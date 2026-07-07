@@ -101,7 +101,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func setUpStatusItem() {
-        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        // variableLength: el ícono lleva el logo y, con manos libres activo,
+        // el sufijo "👂" — el ancho cambia según el estado.
+        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem.button?.appearsDisabled = true // hasta que cargue el modelo
 
         let menu = NSMenu()
@@ -137,13 +139,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         updateStatusIcon()
     }
 
-    /// `waveform` cuando el modo manos libres está activo, `mic.fill` en el
-    /// modo normal (solo hotkey Fn) — refleja de un vistazo si kiki está
-    /// escuchando ambiente continuamente o solo mientras se mantiene Fn.
+    /// Logo de kiki en la barra de menú (marca del producto). El estado del
+    /// modo manos libres se refleja con el sufijo "👂" junto al logo — de un
+    /// vistazo se sabe si kiki escucha ambiente continuo o solo con Fn.
+    /// Fallback al SF Symbol de micrófono si el ícono del bundle no carga.
     private func updateStatusIcon() {
-        let symbolName = wakeEnabled ? "waveform" : "mic.fill"
-        statusItem.button?.image = NSImage(
-            systemSymbolName: symbolName, accessibilityDescription: "kiki")
+        if let iconURL = Bundle.main.url(forResource: "AppIcon", withExtension: "icns"),
+           let logo = NSImage(contentsOf: iconURL) {
+            logo.size = NSSize(width: 20, height: 20)
+            statusItem.button?.image = logo
+        } else {
+            statusItem.button?.image = NSImage(
+                systemSymbolName: wakeEnabled ? "waveform" : "mic.fill",
+                accessibilityDescription: "kiki")
+        }
+        statusItem.button?.title = wakeEnabled ? " 👂" : ""
+        statusItem.button?.imagePosition = .imageLeading
     }
 
     @MainActor @objc private func openSettings() {
