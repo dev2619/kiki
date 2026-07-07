@@ -784,6 +784,39 @@ final class DictationControllerTests: XCTestCase {
         XCTAssertEqual(refiner.receivedLanguages, ["en"], "processTranscript (same-breath wake path) must also thread the detected language")
     }
 
+    // Regression for the same-breath TOCTOU: on the wake same-breath path,
+    // WakeListener transcribes the text itself and captures the detected
+    // language in the same serialized unit, then delivers both together. The
+    // listener stays .listening (mic tap live) through several unstructured-Task
+    // hops before stop() fires, so a trailing/ambient segment can re-run
+    // transcribe() and overwrite the provider's lastDetectedLanguage BEFORE the
+    // controller would read it. processTranscript(_:language:) must use the
+    // language delivered WITH the text, never a disconnected provider read.
+    func test_processTranscriptWithExplicitLanguageIgnoresMutatedProvider() async {
+        let refiner = MockRefiner()
+        refiner.textToReturn = "refined"
+        let context = MockContext()
+        // Provider now reports "es" — simulating an interleaved second
+        // transcribe() (e.g. a trailing ambient segment) that already
+        // overwrote lastDetectedLanguage after the same-breath text was
+        // produced in English.
+        let languageProvider = MockLanguageProvider()
+        languageProvider.languageToReturn = "es"
+        controller = DictationController(
+            recorder: recorder, transcriber: transcriber, inserter: inserter,
+            refiner: refiner, context: context, minRefinableLength: 0,
+            languageProvider: languageProvider)
+        controller.delegate = delegate
+
+        // The same-breath text was detected as English; the language is
+        // delivered explicitly alongside it.
+        await controller.processTranscript("are you understanding my english", language: "en")
+
+        XCTAssertEqual(
+            refiner.receivedLanguages, ["en"],
+            "Explicit same-breath language must win over the (now stale) provider value — closing the TOCTOU")
+    }
+
     // MARK: - Translate Mode (opt-in feature: default OFF, pins output to the
     // OTHER language when ON; bypasses minRefinableLength and relaxes the
     // length guards since translation legitimately changes text length)

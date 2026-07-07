@@ -114,18 +114,28 @@ public final class DictationController {
         }
     }
 
-    public func processTranscript(_ text: String) async {
+    /// - Parameter language: Idioma detectado ("es"/"en") por la transcripción
+    ///   que produjo `text`. Cuando el llamador lo conoce (path "mismo aliento"
+    ///   de WakeListener, que transcribió el texto él mismo y capturó el
+    ///   idioma en la MISMA unidad serializada), DEBE pasarlo — así este método
+    ///   NUNCA hace una lectura desconectada del `languageProvider`, que en ese
+    ///   path sufría una TOCTOU: el listener sigue `.listening` (tap vivo) por
+    ///   varios saltos de Task antes de `stop()`, así que un segmento de cola
+    ///   podía re-ejecutar `transcribe()` y sobrescribir `lastDetectedLanguage`
+    ///   antes de esta lectura → idioma equivocado. Con `nil` (llamadores
+    ///   públicos/otros) cae a la lectura del provider, comportamiento previo.
+    public func processTranscript(_ text: String, language: String? = nil) async {
         guard state == .idle else { return }
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         transition(to: .processing)
-        // Este texto ya fue transcrito por otro llamador (p. ej. el "mismo
-        // aliento" de WakeListener) usando el MISMO WhisperTranscriber
-        // compartido con el hotkey — el actor serializa sus llamadas (ver
-        // doc de `WhisperTranscriber`), así que `languageProvider` todavía
-        // refleja el idioma de ESA transcripción cuando llegamos aquí.
-        let language = await languageProvider?.detectedLanguage() ?? "es"
-        await processTranscriptContent(text, audioSeconds: 0, language: language)
+        let resolvedLanguage: String
+        if let language {
+            resolvedLanguage = language
+        } else {
+            resolvedLanguage = await languageProvider?.detectedLanguage() ?? "es"
+        }
+        await processTranscriptContent(text, audioSeconds: 0, language: resolvedLanguage)
     }
 
     private func processTranscriptContent(_ text: String, audioSeconds: Double = 0, language: String = "es") async {

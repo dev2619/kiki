@@ -571,7 +571,7 @@ extension AppDelegate: WakeListenerDelegate {
         Task { await controller.process(samples: samples) }
     }
 
-    func wakeListenerDidCaptureSameBreath(text: String, sessionIsCurrent: Bool) {
+    func wakeListenerDidCaptureSameBreath(text: String, language: String, sessionIsCurrent: Bool) {
         // Mismo guard que wakeListenerDidCapture — ver comentario ahí.
         guard controller.state == .idle else {
             KikiLog.log("kiki: captura descartada — controller en \(controller.state)")
@@ -583,7 +583,11 @@ extension AppDelegate: WakeListenerDelegate {
         // listening plano. Gateado por `wakeEnabled` y por el token de
         // frescura por las mismas razones (ver traza de la carrera arriba).
         resumeAsArmed = wakeEnabled && sessionIsCurrent
-        Task { await controller.processTranscript(text) }
+        // `language` viene capturado JUNTO con el texto por WakeListener (misma
+        // unidad serializada que su `transcribe()`), así que se pasa explícito
+        // — el controller NO debe releerlo del transcriber en este path (cierre
+        // de la TOCTOU, ver `processTranscript`/`wakeListenerDidCaptureSameBreath`).
+        Task { await controller.processTranscript(text, language: language) }
     }
 
     func wakeListenerDidDisarm() {

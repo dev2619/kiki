@@ -20,7 +20,16 @@ public protocol WakeListenerDelegate: AnyObject {
     func wakeListenerDidCapture(samples: [Float], sessionIsCurrent: Bool)
     /// Frase + dictado en el mismo aliento ("escúchame kiki, escribe X").
     /// `sessionIsCurrent`: mismo token de frescura que `wakeListenerDidCapture`.
-    func wakeListenerDidCaptureSameBreath(text: String, sessionIsCurrent: Bool)
+    /// `language`: idioma detectado ("es"/"en") por la MISMA `transcribe()` que
+    /// produjo `text`, capturado inmediatamente después de ella dentro de la
+    /// tarea de transcripción (ver `handleListeningSegment`). Se entrega JUNTO
+    /// con el texto — en vez de que el delegate lo relea del transcriber más
+    /// tarde — para cerrar una TOCTOU: en este path el listener sigue
+    /// `.listening` (tap vivo) a través de varios saltos de Task antes de
+    /// `stop()`, así que un segmento ambiente/de cola podía re-ejecutar
+    /// `transcribe()` y sobrescribir `lastDetectedLanguage` ANTES de que el
+    /// delegate lo leyera → idioma equivocado.
+    func wakeListenerDidCaptureSameBreath(text: String, language: String, sessionIsCurrent: Bool)
     /// Se armó pero no hubo dictado dentro del timeout.
     func wakeListenerDidDisarm()
 }
@@ -622,12 +631,26 @@ public final class WakeListener: @unchecked Sendable {
         let capturedSession = session
         transcriptionTask = Task {
             let text: String?
+            // Idioma detectado por ESTA transcripción, capturado en la misma
+            // unidad serializada (inmediatamente tras `transcribe()`, antes
+            // del `queue.async` y de los saltos de Task posteriores) para
+            // cerrar la TOCTOU descrita en `wakeListenerDidCaptureSameBreath`:
+            // se entrega junto con el texto en vez de que el delegate lo relea
+            // del transcriber varios saltos después, cuando un segmento de
+            // cola ya pudo haber corrido otra `transcribe()` y sobrescrito
+            // `lastDetectedLanguage`. Default "es" si el transcriber no
+            // conforma `LanguageDetecting` (mismo fallback que el resto del
+            // pipeline).
+            var detectedLanguage = "es"
             // `Date()` es diagnóstico puro aquí (desglose de latencia en el
             // log), no gobierna ninguna lógica testeable — está bien no
             // medirlo por conteo de muestras como el resto de la clase.
             let transcribeStarted = Date()
             do {
                 text = try await transcriber.transcribe(samples)
+                if let languageDetecting = transcriber as? LanguageDetecting {
+                    detectedLanguage = await languageDetecting.detectedLanguage()
+                }
             } catch {
                 KikiLog.log("kiki wake: transcripción falló (\(error))")
                 text = nil
@@ -652,7 +675,7 @@ public final class WakeListener: @unchecked Sendable {
                 let matched = text.flatMap(WakePhraseMatcher.match) != nil
                 KikiLog.log("kiki wake: check — segmento \(String(format: "%.1f", segmentSeconds))s, transcripción \(String(format: "%.1f", transcribeSeconds))s, match \(matched ? "sí" : "no")")
                 if self._state == .listening, let text {
-                    self.applyMatch(text, sampleCount: samples.count)
+                    self.applyMatch(text, language: detectedLanguage, sampleCount: samples.count)
                 }
                 // Un segmento pudo haber quedado pendiente (ver
                 // `handleListeningSegment`) mientras este check estaba en
@@ -670,7 +693,7 @@ public final class WakeListener: @unchecked Sendable {
         }
     }
 
-    private func applyMatch(_ text: String, sampleCount: Int) {
+    private func applyMatch(_ text: String, language: String, sampleCount: Int) {
         dispatchPrecondition(condition: .onQueue(queue))
         guard let match = WakePhraseMatcher.match(text) else {
             // Regla de privacidad: NO se loggea el contenido de segmentos sin
@@ -689,7 +712,7 @@ public final class WakeListener: @unchecked Sendable {
             // frase, no una notificación de estado. Debe entregarse aunque
             // haya un stop() concurrente; el token de frescura le permite al
             // delegate no rearmar el mic si la sesión ya no es la vigente.
-            notifyCapture { $0.wakeListenerDidCaptureSameBreath(text: match.remainder, sessionIsCurrent: $1) }
+            notifyCapture { $0.wakeListenerDidCaptureSameBreath(text: match.remainder, language: language, sessionIsCurrent: $1) }
         }
     }
 
