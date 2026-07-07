@@ -291,7 +291,10 @@ private struct HistorySectionView: View {
                     )
                     .frame(maxWidth: .infinity)
                 } else {
-                    ForEach(Array(viewModel.historyEntries.enumerated()), id: \.offset) { _, entry in
+                    // Identidad estable por fecha: con el refresco en vivo, un
+                    // id posicional haría saltar el estado expandido de fila
+                    // cuando entra un dictado nuevo.
+                    ForEach(viewModel.historyEntries, id: \.date) { entry in
                         HistoryRow(
                             entry: entry,
                             relativeFormatter: Self.relativeFormatter,
