@@ -14,9 +14,18 @@ public enum KikiLog {
     }()
 
     /// true cuando el proceso es un test runner (XCTest) — los tests no deben
-    /// escribir al kiki.log real del usuario (confunde el diagnóstico en campo).
+    /// escribir al kiki.log real del usuario (confunde el diagnóstico en
+    /// campo). `XCTestConfigurationFilePath` solo lo fija Xcode al correr
+    /// tests desde el IDE/`xcodebuild`; bajo `swift test` (SwiftPM) esa
+    /// variable de entorno queda sin setear, así que la detección fallaba
+    /// silenciosamente en ese flujo y las líneas de log de la suite
+    /// terminaban ensuciando el kiki.log real. `NSClassFromString("XCTestCase")`
+    /// es un segundo chequeo independiente del entorno: si el binario XCTest
+    /// está linkeado (cualquier test runner, SwiftPM incluido), la clase
+    /// existe en el runtime de Obj-C aunque la env var no esté seteada.
     private static let isTestRun =
         ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
+        || NSClassFromString("XCTestCase") != nil
 
     public static func log(_ message: String) {
         NSLog("%@", message)
