@@ -114,17 +114,20 @@ public final class SpeechSegmenter {
     /// state (adaptive mode only), used by relative-drop end detection (see
     /// `endDropRatio` / `windowedPeakRMS`). Each entry is `(rms, sampleCount)`;
     /// the window is bounded to the most recent `peakWindowSeconds` of speech
-    /// by sample count, so a single loud transient's influence on the peak
-    /// EXPIRES after that window instead of persisting for the whole
-    /// utterance. Reset (and re-seeded with the triggering chunk) at every
-    /// silence→speech transition, and cleared whenever a segment ends, is
-    /// discarded, or is flushed.
+    /// by sample count, so the relative bar tracks the RECENT speaking level
+    /// rather than the whole utterance. Reset (and re-seeded with the
+    /// triggering chunk) at every silence→speech transition, and cleared
+    /// whenever a segment ends, is discarded, or is flushed.
     ///
-    /// Was originally an unbounded running max, which caused a regression: a
-    /// single loud transient (an emphasized word, a door slam) permanently
-    /// raised the relative end bar (`peak * endDropRatio`), so subsequent
-    /// normal speech classified as silence and the segment ended
-    /// mid-sentence — reproduced even in a quiet room.
+    /// The peak read from this window (`windowedPeakRMS`) is a SUSTAINED peak,
+    /// not a plain max: brief loud transients are filtered out (see
+    /// `transientMaxDurationSeconds`). Two regressions motivated this: (1) an
+    /// unbounded running max let a transient raise the bar for the whole
+    /// utterance; (2) merely bounding it to a window still let a transient
+    /// raise the bar for the window's duration, and that window cannot be made
+    /// shorter than `endSilence` without breaking noisy-room end detection.
+    /// The sustained-peak filter removes the transient's contribution
+    /// entirely, decoupling transient robustness from window length.
     private var speechRMSWindow: [(rms: Float, sampleCount: Int)] = []
     /// Running total of `sampleCount` across `speechRMSWindow`, kept in sync
     /// so eviction doesn't have to re-sum the window each chunk.
@@ -221,9 +224,14 @@ public final class SpeechSegmenter {
     /// absolute exit threshold, so the absolute check still governs and
     /// normal speech still ends the same way it always did.
     ///
-    /// The peak is WINDOWED (see `speechRMSWindow` / `peakWindowSeconds`), not
-    /// an unbounded running max: otherwise a single loud transient would raise
-    /// the bar permanently and truncate the rest of the utterance.
+    /// The peak is a WINDOWED, SUSTAINED peak (see `speechRMSWindow` /
+    /// `windowedPeakRMS` / `transientMaxDurationSeconds`), not an unbounded
+    /// running max: an unbounded max let one loud transient raise the bar for
+    /// the whole utterance, and even a plain windowed max let it raise the bar
+    /// for the window's duration (which can't be shortened below `endSilence`
+    /// without breaking noisy-room detection). The sustained-peak filter drops
+    /// brief transients from the peak outright, so continued softer speech
+    /// after an emphasized word or a door slam is not truncated.
     ///
     /// HONEST LIMIT (documented, not silently glossed over): if ambient
     /// noise is close to, or louder than, the user's own speech level, there
@@ -238,13 +246,36 @@ public final class SpeechSegmenter {
     private static let endDropRatio: Float = 0.35
 
     /// Duration of the sliding peak window (adaptive mode only) that backs
-    /// relative-drop end detection (see `speechRMSWindow` / `endDropRatio`):
-    /// the relative end bar is derived from the max RMS over the last
-    /// ~`peakWindowSeconds` of speech, so a loud transient stops inflating the
-    /// bar once it ages past this window. Chosen so normal continued speech
-    /// survives a transient — after a transient ages out, the bar falls back
-    /// to `recentNormalRMS * endDropRatio`, well under normal speech.
+    /// relative-drop end detection (see `speechRMSWindow` / `windowedPeakRMS`):
+    /// the relative end bar tracks the max SUSTAINED RMS over the last
+    /// `peakWindowSeconds` of speech, so the bar follows the user's recent
+    /// speaking level rather than being pinned to the whole utterance's loudest
+    /// instant.
+    ///
+    /// Why NOT sized below `endSilence` (the shorter-window idea): it can't
+    /// work. A short window forgets the speech peak before the end-of-utterance
+    /// silence completes, so a quiet-but-above-absolute-exit tail in a noisy
+    /// room re-classifies as speech and the segment never ends — i.e. it breaks
+    /// the very noisy-room case relative-drop exists to handle (verified: the
+    /// noisy-room and don't-cut-mid-utterance tests both fail with a
+    /// sub-`endSilence` window). Transient robustness is instead provided
+    /// ORTHOGONALLY by `windowedPeakRMS`'s sustained-peak filter
+    /// (`transientMaxDurationSeconds`), which excludes brief spikes from the
+    /// peak regardless of window length — so the window stays long enough to
+    /// remember the speaking level, and a transient never inflates the bar in
+    /// the first place.
     private static let peakWindowSeconds: Double = 2.0
+
+    /// A run of elevated RMS SHORTER than this (adaptive mode only) is treated
+    /// as a transient — an emphasized syllable, a door slam, a key clack — and
+    /// excluded from `windowedPeakRMS`, so it cannot raise the relative end bar
+    /// and truncate the softer speech that follows. Runs at least this long
+    /// count as the real speaking level. This is the fix for the Critical
+    /// regression where a single loud chunk permanently (or, with a plain
+    /// window, for the window's duration) raised the bar and cut the utterance
+    /// mid-sentence — reproduced even in a quiet room. 0.25s comfortably clears
+    /// a percussive transient while staying under a sustained loud phrase.
+    private static let transientMaxDurationSeconds: Double = 0.25
 
     /// Absolute floor on the effective threshold: even a dead-silent room
     /// (noise floor near zero) must not classify near-zero-RMS noise/whispers
@@ -407,14 +438,43 @@ public final class SpeechSegmenter {
     }
 
     // MARK: - Helper: Sliding peak window (relative-drop end detection)
-    /// Max RMS over the current sliding window (see `speechRMSWindow`); `0`
-    /// when the window is empty. This is the "recent peak" the relative end
-    /// bar is derived from.
+    /// The SUSTAINED peak RMS over the current sliding window (see
+    /// `speechRMSWindow`); `0` when no run in the window is long enough to
+    /// qualify. This is the "recent speaking level" the relative end bar is
+    /// derived from.
+    ///
+    /// Sustained, not a plain max: a brief loud transient must NOT raise the
+    /// bar (see `transientMaxDurationSeconds`). For every window position we
+    /// take the MINIMUM RMS across the trailing run needed to span
+    /// `transientMaxSamples`, then the maximum of those minima. A lone loud
+    /// chunk is dragged down by its quieter neighbours inside the run, so it
+    /// never becomes the peak; a genuinely sustained loud stretch keeps a high
+    /// minimum and does. O(n·k) with n≈window chunks (~20) and k the run
+    /// length (~2-3) — trivially cheap at chunk cadence.
     private var windowedPeakRMS: Float {
-        speechRMSWindow.reduce(Float(0)) { max($0, $1.rms) }
+        guard !speechRMSWindow.isEmpty else { return 0 }
+        let minRun = transientMaxSamples
+        var best: Float = 0
+        for end in speechRMSWindow.indices {
+            var accumulated = 0
+            var runMin = Float.greatestFiniteMagnitude
+            var i = end
+            while i >= 0, accumulated < minRun {
+                runMin = min(runMin, speechRMSWindow[i].rms)
+                accumulated += speechRMSWindow[i].sampleCount
+                i -= 1
+            }
+            // Only runs that actually span the transient horizon qualify;
+            // ignore the not-yet-long-enough tail at the window's start.
+            if accumulated >= minRun {
+                best = max(best, runMin)
+            }
+        }
+        return best
     }
 
-    private var peakWindowMaxSamples: Int { Int(sampleRate * Self.peakWindowSeconds) }
+    private var peakWindowMaxSamples: Int { max(1, Int(sampleRate * Self.peakWindowSeconds)) }
+    private var transientMaxSamples: Int { max(1, Int(sampleRate * Self.transientMaxDurationSeconds)) }
 
     /// Append a chunk's RMS to the sliding window and evict the oldest entries
     /// while the window exceeds `peakWindowSeconds` — always keeping at least
