@@ -2,6 +2,10 @@ import AppKit
 import SwiftUI
 import KikiStore
 
+/// Acento de marca kiki (#7C5CFC), aplicado con `.tint` en la raíz de
+/// `SettingsRootView` — Fase 3.6, Task 2.
+private let kikiAccent = Color(red: 0x7C / 255.0, green: 0x5C / 255.0, blue: 0xFC / 255.0)
+
 /// Ventana normal (no HUD) de Ajustes: `NSWindow` con `NSHostingView`,
 /// singleton reutilizado entre aperturas (patrón similar a `HUDController`
 /// pero con ventana titulada/cerrable en vez de panel flotante borderless).
@@ -14,9 +18,16 @@ import KikiStore
 final class SettingsWindowController {
     private var window: NSWindow?
     private let viewModel: SettingsViewModel
+    private var keyObserver: NSObjectProtocol?
 
     init(viewModel: SettingsViewModel) {
         self.viewModel = viewModel
+    }
+
+    deinit {
+        if let keyObserver {
+            NotificationCenter.default.removeObserver(keyObserver)
+        }
     }
 
     func show() {
@@ -29,15 +40,29 @@ final class SettingsWindowController {
         }
 
         let newWindow = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 560, height: 440),
-            styleMask: [.titled, .closable],
+            contentRect: NSRect(x: 0, y: 0, width: 680, height: 460),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false)
         newWindow.title = "kiki — Ajustes"
         newWindow.isReleasedWhenClosed = false
+        newWindow.minSize = NSSize(width: 640, height: 420)
         newWindow.center()
         newWindow.contentView = NSHostingView(rootView: SettingsRootView(viewModel: viewModel))
         window = newWindow
+
+        // Refresco en vivo del Historial (Fase 3.6, Task 2): además del
+        // refresh explícito de arriba (al invocar `show()`), la ventana
+        // vuelve a refrescar todo su estado cada vez que recupera el foco —
+        // cubre el caso de dejarla abierta en segundo plano mientras se
+        // dictan cosas y volver a ella sin cerrarla/reabrirla.
+        keyObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.didBecomeKeyNotification,
+            object: newWindow,
+            queue: .main
+        ) { [weak viewModel] _ in
+            Task { @MainActor in viewModel?.refreshAll() }
+        }
 
         newWindow.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
@@ -47,56 +72,131 @@ final class SettingsWindowController {
 struct SettingsRootView: View {
     @ObservedObject var viewModel: SettingsViewModel
 
+    private var sectionBinding: Binding<SettingsSection?> {
+        Binding(
+            get: { viewModel.selectedSection },
+            set: { newValue in
+                if let newValue { viewModel.selectedSection = newValue }
+            })
+    }
+
     var body: some View {
-        TabView {
-            DictionaryTabView(viewModel: viewModel)
-                .tabItem { Label("Diccionario", systemImage: "text.book.closed") }
-            SnippetsTabView(viewModel: viewModel)
-                .tabItem { Label("Snippets", systemImage: "text.insert") }
-            HistoryTabView(viewModel: viewModel)
-                .tabItem { Label("Historial", systemImage: "clock.arrow.circlepath") }
-            GeneralTabView(viewModel: viewModel)
-                .tabItem { Label("General", systemImage: "gearshape") }
+        NavigationSplitView {
+            List(SettingsSection.allCases, selection: sectionBinding) { section in
+                Label(section.title, systemImage: section.symbolName)
+            }
+            .navigationSplitViewColumnWidth(min: 170, ideal: 190, max: 220)
+        } detail: {
+            Group {
+                switch viewModel.selectedSection {
+                case .general:
+                    GeneralSectionView(viewModel: viewModel)
+                case .dictionary:
+                    DictionarySectionView(viewModel: viewModel)
+                case .snippets:
+                    SnippetsSectionView(viewModel: viewModel)
+                case .history:
+                    HistorySectionView(viewModel: viewModel)
+                case .about:
+                    AboutSectionView()
+                }
+            }
+            .navigationTitle(viewModel.selectedSection.title)
         }
-        .padding()
-        .frame(minWidth: 520, idealWidth: 560, minHeight: 400, idealHeight: 440)
+        .tint(kikiAccent)
+        .frame(minWidth: 640, minHeight: 420)
+    }
+}
+
+// MARK: - General
+
+private struct GeneralSectionView: View {
+    @ObservedObject var viewModel: SettingsViewModel
+
+    var body: some View {
+        Form {
+            Section {
+                Toggle(isOn: Binding(
+                    get: { viewModel.wakeEnabled },
+                    set: { _ in viewModel.requestToggleWake() }
+                )) {
+                    HStack(spacing: 8) {
+                        Text("Manos libres: \"escúchame kiki\"")
+                        shortcutBadge("⌥⌘K")
+                    }
+                }
+                Toggle("Sonidos de confirmación", isOn: $viewModel.soundCuesEnabled)
+            } header: {
+                Text("Manos libres")
+            } footer: {
+                Text("Actívalo y di \"escúchame kiki\" para dictar sin tocar nada, o alterna el modo en cualquier momento con ⌥⌘K. Los sonidos de confirmación marcan cuándo kiki empieza a escuchar, detecta tu voz, inserta el texto o se desactiva — sin que tengas que mirar la pantalla.")
+            }
+
+            Section("Dictado") {
+                LabeledContent("Atajo", value: viewModel.hotkeyDescription)
+                LabeledContent("Frases de activación", value: viewModel.wakePhrasesDescription)
+            }
+
+            Section("Modelos cargados") {
+                LabeledContent("Transcripción", value: viewModel.sttModelDescription)
+                LabeledContent("Refinado", value: viewModel.refineModelDescription)
+            }
+        }
+        .formStyle(.grouped)
+    }
+
+    private func shortcutBadge(_ text: String) -> some View {
+        Text(text)
+            .font(.caption.monospaced())
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(Color.secondary.opacity(0.15), in: RoundedRectangle(cornerRadius: 4))
+            .foregroundStyle(.secondary)
     }
 }
 
 // MARK: - Diccionario
 
-private struct DictionaryTabView: View {
+private struct DictionarySectionView: View {
     @ObservedObject var viewModel: SettingsViewModel
     @State private var newTerm = ""
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            if viewModel.terms.isEmpty {
-                emptyState("Sin términos todavía.")
-            } else {
-                List {
+        Form {
+            Section {
+                if viewModel.terms.isEmpty {
+                    ContentUnavailableView(
+                        "Sin términos todavía",
+                        systemImage: "character.book.closed",
+                        description: Text("Añade nombres propios, siglas o palabras técnicas para que kiki las reconozca.")
+                    )
+                    .frame(maxWidth: .infinity)
+                } else {
                     ForEach(viewModel.terms, id: \.self) { term in
-                        HStack {
+                        HoverDeleteRow(onDelete: { viewModel.removeTerm(term) }) {
                             Text(term)
-                            Spacer()
-                            Button(role: .destructive) {
-                                viewModel.removeTerm(term)
-                            } label: {
-                                Image(systemName: "trash")
-                            }
-                            .buttonStyle(.borderless)
                         }
                     }
                 }
+            } header: {
+                Text("Diccionario personal")
+            } footer: {
+                Text("kiki reconocerá y escribirá estos términos exactamente como los escribas.")
             }
-            HStack {
-                TextField("Nuevo término (p. ej. un nombre propio)", text: $newTerm)
-                    .onSubmit(addTerm)
-                Button("Añadir", action: addTerm)
+
+            Section {
+                HStack {
+                    TextField("Nuevo término (p. ej. un nombre propio)", text: $newTerm)
+                        .onSubmit(addTerm)
+                    Button(action: addTerm) {
+                        Image(systemName: "plus")
+                    }
+                    .buttonStyle(.borderedProminent)
                     .disabled(newTerm.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
             }
         }
-        .padding(.top, 8)
+        .formStyle(.grouped)
     }
 
     private func addTerm() {
@@ -107,47 +207,58 @@ private struct DictionaryTabView: View {
 
 // MARK: - Snippets
 
-private struct SnippetsTabView: View {
+private struct SnippetsSectionView: View {
     @ObservedObject var viewModel: SettingsViewModel
     @State private var trigger = ""
     @State private var template = ""
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            if viewModel.snippets.isEmpty {
-                emptyState("Sin snippets todavía.")
-            } else {
-                List {
+        Form {
+            Section {
+                if viewModel.snippets.isEmpty {
+                    ContentUnavailableView(
+                        "Sin snippets todavía",
+                        systemImage: "text.badge.plus",
+                        description: Text("Crea atajos de voz: di el trigger y kiki insertará la plantilla completa en su lugar.")
+                    )
+                    .frame(maxWidth: .infinity)
+                } else {
                     ForEach(viewModel.snippets, id: \.trigger) { snippet in
-                        HStack(alignment: .top) {
-                            VStack(alignment: .leading) {
+                        HoverDeleteRow(onDelete: { viewModel.removeSnippet(trigger: snippet.trigger) }) {
+                            VStack(alignment: .leading, spacing: 2) {
                                 Text(snippet.trigger).bold()
                                 Text(snippet.template)
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                                     .lineLimit(1)
                             }
-                            Spacer()
-                            Button(role: .destructive) {
-                                viewModel.removeSnippet(trigger: snippet.trigger)
-                            } label: {
-                                Image(systemName: "trash")
-                            }
-                            .buttonStyle(.borderless)
                         }
                     }
                 }
+            } header: {
+                Text("Snippets de voz")
+            } footer: {
+                Text("Di el trigger mientras dictas y kiki lo reemplazará por la plantilla completa — útil para firmas, saludos o texto repetitivo.")
             }
-            HStack {
-                TextField("Trigger (lo que dictas)", text: $trigger)
-                TextField("Plantilla (lo que se inserta)", text: $template)
-                Button("Añadir", action: addSnippet)
-                    .disabled(
-                        trigger.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                            || template.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+
+            Section {
+                VStack(alignment: .leading, spacing: 8) {
+                    TextField("Trigger (lo que dictas)", text: $trigger)
+                    TextField("Plantilla (lo que se inserta)", text: $template)
+                    HStack {
+                        Spacer()
+                        Button(action: addSnippet) {
+                            Label("Añadir", systemImage: "plus")
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(
+                            trigger.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                                || template.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    }
+                }
             }
         }
-        .padding(.top, 8)
+        .formStyle(.grouped)
     }
 
     private func addSnippet() {
@@ -159,89 +270,170 @@ private struct SnippetsTabView: View {
 
 // MARK: - Historial
 
-private struct HistoryTabView: View {
+private struct HistorySectionView: View {
     @ObservedObject var viewModel: SettingsViewModel
+    @State private var confirmingClear = false
 
-    private static let dateFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.dateStyle = .short
-        formatter.timeStyle = .short
+    private static let relativeFormatter: RelativeDateTimeFormatter = {
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .full
         return formatter
     }()
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            if viewModel.historyEntries.isEmpty {
-                emptyState("Sin dictados registrados todavía.")
-            } else {
-                List {
+        Form {
+            Section {
+                if viewModel.historyEntries.isEmpty {
+                    ContentUnavailableView(
+                        "Sin dictados registrados",
+                        systemImage: "clock",
+                        description: Text("Tus dictados aparecerán aquí a medida que uses kiki.")
+                    )
+                    .frame(maxWidth: .infinity)
+                } else {
                     ForEach(Array(viewModel.historyEntries.enumerated()), id: \.offset) { _, entry in
-                        HStack(alignment: .top) {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(Self.dateFormatter.string(from: entry.date))
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                                Text(Self.truncated(entry.finalText))
-                                    .help(entry.rawText) // tooltip con el texto crudo completo
-                            }
-                            Spacer()
-                            Button("Copiar") {
-                                viewModel.copyToClipboard(entry.finalText)
-                            }
-                            .buttonStyle(.borderless)
-                        }
+                        HistoryRow(
+                            entry: entry,
+                            relativeFormatter: Self.relativeFormatter,
+                            onCopy: { viewModel.copyToClipboard(entry.finalText) })
+                    }
+                }
+            } header: {
+                Text("Historial de dictados")
+            } footer: {
+                Text("kiki guarda tus últimos dictados localmente para que puedas revisarlos o copiarlos de nuevo.")
+            }
+
+            if !viewModel.historyEntries.isEmpty {
+                Section {
+                    Button("Borrar historial", role: .destructive) {
+                        confirmingClear = true
                     }
                 }
             }
+        }
+        .formStyle(.grouped)
+        .confirmationDialog(
+            "¿Borrar todo el historial de dictados?",
+            isPresented: $confirmingClear,
+            titleVisibility: .visible
+        ) {
             Button("Borrar historial", role: .destructive) {
                 viewModel.clearHistory()
             }
-            .disabled(viewModel.historyEntries.isEmpty)
+            Button("Cancelar", role: .cancel) {}
+        } message: {
+            Text("Esta acción no se puede deshacer.")
         }
-        .padding(.top, 8)
-    }
-
-    private static func truncated(_ text: String, limit: Int = 90) -> String {
-        guard text.count > limit else { return text }
-        return String(text.prefix(limit)) + "…"
     }
 }
 
-// MARK: - General
+private struct HistoryRow: View {
+    let entry: HistoryEntry
+    let relativeFormatter: RelativeDateTimeFormatter
+    let onCopy: () -> Void
+    @State private var expanded = false
 
-private struct GeneralTabView: View {
-    @ObservedObject var viewModel: SettingsViewModel
+    var body: some View {
+        DisclosureGroup(isExpanded: $expanded) {
+            Text(entry.rawText)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+                .padding(.top, 4)
+        } label: {
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(relativeFormatter.localizedString(for: entry.date, relativeTo: Date()))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text(entry.finalText)
+                        .lineLimit(2)
+                }
+                Spacer()
+                Button(action: onCopy) {
+                    Image(systemName: "doc.on.doc")
+                }
+                .buttonStyle(.borderless)
+                .help("Copiar al portapapeles")
+            }
+        }
+    }
+}
+
+// MARK: - Acerca de
+
+private struct AboutSectionView: View {
+    private var appIcon: NSImage? {
+        guard let url = Bundle.main.url(forResource: "AppIcon", withExtension: "icns") else { return nil }
+        return NSImage(contentsOf: url)
+    }
+
+    private var version: String {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "—"
+    }
 
     var body: some View {
         Form {
-            Section("Dictado") {
-                LabeledContent("Atajo", value: viewModel.hotkeyDescription)
-                LabeledContent("Frases de activación", value: viewModel.wakePhrasesDescription)
-            }
-            Section("Modelos") {
-                LabeledContent("Transcripción", value: viewModel.sttModelDescription)
-                LabeledContent("Refinado", value: viewModel.refineModelDescription)
-            }
-            Section("Manos libres") {
-                Toggle(
-                    "Manos libres: \"escúchame kiki\"",
-                    isOn: Binding(
-                        get: { viewModel.wakeEnabled },
-                        set: { _ in viewModel.requestToggleWake() }
-                    ))
+            Section {
+                VStack(spacing: 12) {
+                    if let appIcon {
+                        Image(nsImage: appIcon)
+                            .resizable()
+                            .frame(width: 96, height: 96)
+                    } else {
+                        // Fallback si no corre empaquetada como .app (p. ej.
+                        // `swift run`): AppIcon.icns solo existe dentro de
+                        // Contents/Resources tras `make bundle`.
+                        Image(systemName: "waveform.circle.fill")
+                            .resizable()
+                            .frame(width: 96, height: 96)
+                            .foregroundStyle(kikiAccent)
+                    }
+                    Text("kiki")
+                        .font(.title.bold())
+                    Text("Versión \(version)")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                    Text("Dictado por voz con IA — 100% local")
+                        .font(.callout)
+                    Link("github.com/dev2619/kiki", destination: URL(string: "https://github.com/dev2619/kiki")!)
+                        .font(.callout)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 12)
             }
         }
-        .padding(.top, 8)
+        .formStyle(.grouped)
     }
 }
 
 // MARK: - Shared
 
-@ViewBuilder
-private func emptyState(_ text: String) -> some View {
-    Text(text)
-        .font(.callout)
-        .foregroundStyle(.secondary)
-        .frame(maxWidth: .infinity, alignment: .center)
-        .padding(.vertical, 24)
+/// Fila con botón de borrado (`trash`) que solo aparece al pasar el mouse
+/// por encima, más un ítem equivalente en el menú contextual (clic derecho)
+/// para descubribilidad sin depender del hover — patrón macOS-nativo (Mail,
+/// Notas) en vez del botón siempre visible de la versión anterior.
+private struct HoverDeleteRow<Content: View>: View {
+    let onDelete: () -> Void
+    @ViewBuilder let content: () -> Content
+    @State private var isHovering = false
+
+    var body: some View {
+        HStack {
+            content()
+            Spacer()
+            if isHovering {
+                Button(role: .destructive, action: onDelete) {
+                    Image(systemName: "trash")
+                }
+                .buttonStyle(.borderless)
+            }
+        }
+        .contentShape(Rectangle())
+        .onHover { isHovering = $0 }
+        .contextMenu {
+            Button("Eliminar", role: .destructive, action: onDelete)
+        }
+    }
 }

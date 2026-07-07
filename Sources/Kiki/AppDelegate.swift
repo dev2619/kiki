@@ -340,8 +340,12 @@ extension AppDelegate: DictationControllerDelegate {
     /// Cue "inserted": suena en AMBOS modos (hotkey y manos-libres) porque
     /// este delegate cubre las dos rutas — `DictationController` no
     /// distingue el origen de la captura, solo notifica tras insertar.
+    /// También postea `.kikiDictationInserted` (Fase 3.6, Task 2) para que
+    /// la pestaña Historial de Ajustes se refresque en vivo si la ventana
+    /// está abierta — `SettingsViewModel` es quien observa esta notificación.
     func dictationDidInsert() {
         SoundCues.play(.inserted)
+        NotificationCenter.default.post(name: .kikiDictationInserted, object: nil)
     }
 }
 
