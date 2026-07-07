@@ -57,16 +57,20 @@ final class SettingsWindowController {
             return
         }
 
-        let newWindow = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 680, height: 460),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable],
-            backing: .buffered,
-            defer: false)
+        // Hosteamos vía NSHostingController (no `contentView = NSHostingView`):
+        // el controller instala la vista SwiftUI en la cadena de responders y
+        // en el hit-testing de la ventana de forma correcta para una ventana
+        // creada por código desde una app de menu bar. Asignar el NSHostingView
+        // directo como contentView deja la vista dibujada pero sin recibir
+        // eventos de mouse en este escenario.
+        let host = NSHostingController(rootView: SettingsRootView(viewModel: viewModel))
+        let newWindow = NSWindow(contentViewController: host)
+        newWindow.styleMask = [.titled, .closable, .miniaturizable, .resizable]
         newWindow.title = "kiki — Ajustes"
         newWindow.isReleasedWhenClosed = false
         newWindow.minSize = NSSize(width: 640, height: 420)
+        newWindow.setContentSize(NSSize(width: 680, height: 460))
         newWindow.center()
-        newWindow.contentView = NSHostingView(rootView: SettingsRootView(viewModel: viewModel))
         window = newWindow
 
         // Refresco en vivo del Historial (Fase 3.6, Task 2): además del
@@ -101,18 +105,30 @@ final class SettingsWindowController {
 struct SettingsRootView: View {
     @ObservedObject var viewModel: SettingsViewModel
 
-    private var sectionBinding: Binding<SettingsSection?> {
-        Binding(
-            get: { viewModel.selectedSection },
-            set: { newValue in
-                if let newValue { viewModel.selectedSection = newValue }
-            })
-    }
-
     var body: some View {
         NavigationSplitView {
-            List(SettingsSection.allCases, selection: sectionBinding) { section in
-                Label(section.title, systemImage: section.symbolName)
+            // Botones explícitos por fila en vez de `List(selection:)`: en
+            // macOS 26 la selección de List dentro de NavigationSplitView no
+            // respondía a clicks (diagnóstico 2026-07-07: el binding de
+            // selección nunca se disparaba, mientras los controles del panel
+            // de detalle sí recibían eventos). Los botones no dependen del
+            // hit-testing de la selección de List — siempre responden.
+            List {
+                ForEach(SettingsSection.allCases) { section in
+                    Button {
+                        viewModel.selectedSection = section
+                    } label: {
+                        Label(section.title, systemImage: section.symbolName)
+                            .foregroundStyle(
+                                section == viewModel.selectedSection ? kikiAccent : Color.primary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .listRowBackground(
+                        section == viewModel.selectedSection
+                            ? kikiAccent.opacity(0.15) : Color.clear)
+                }
             }
             .navigationSplitViewColumnWidth(min: 170, ideal: 190, max: 220)
         } detail: {
