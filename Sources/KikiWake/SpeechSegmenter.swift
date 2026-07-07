@@ -17,17 +17,38 @@ public struct SegmenterConfig: Equatable {
     /// and awaiting silence to reset (default: 30.0)
     public let maxSegmentDuration: TimeInterval
 
+    /// When `true`, `SpeechSegmenter` continuously re-estimates the ambient
+    /// noise floor from silence-classified chunks and derives the
+    /// speech/silence classification cutoff from it (see
+    /// `SpeechSegmenter.effectiveThreshold`) instead of treating
+    /// `speechRMSThreshold` as a fixed cutoff for the whole session.
+    /// `speechRMSThreshold` still matters when this is `true`: it becomes the
+    /// INITIAL/floor-seed value used before the floor has learned anything.
+    ///
+    /// Defaults to `false` — a deliberate, zero-risk choice: every existing
+    /// caller (and the 18 pre-existing `SpeechSegmenterTests`) constructs
+    /// `SegmenterConfig` with no knowledge that this flag exists, and their
+    /// synthetic RMS patterns were written against a fixed threshold. Rather
+    /// than risk quietly changing their classification outcomes, adaptive
+    /// behavior is strictly opt-in; `WakeListener` is the one caller that
+    /// turns it on explicitly, because field data showed the fixed threshold
+    /// failing there specifically (loud rooms pin every chunk above
+    /// threshold forever; quiet rooms fragment real speech below it).
+    public let adaptiveThreshold: Bool
+
     /// Initialize with custom or default values.
     public init(
         speechRMSThreshold: Float = 0.008,
         endSilence: TimeInterval = 0.7,
         minSpeechDuration: TimeInterval = 0.4,
-        maxSegmentDuration: TimeInterval = 30.0
+        maxSegmentDuration: TimeInterval = 30.0,
+        adaptiveThreshold: Bool = false
     ) {
         self.speechRMSThreshold = speechRMSThreshold
         self.endSilence = endSilence
         self.minSpeechDuration = minSpeechDuration
         self.maxSegmentDuration = maxSegmentDuration
+        self.adaptiveThreshold = adaptiveThreshold
     }
 }
 
@@ -89,10 +110,73 @@ public final class SpeechSegmenter {
     /// Accumulated samples during silence in speech state (for duration detection only)
     private var accumulatedSilenceSamples: Int = 0
 
+    // MARK: - Adaptive noise floor (see `SegmenterConfig.adaptiveThreshold`)
+    //
+    // Design summary: the noise floor is an EMA of chunk RMS, updated only on
+    // chunks NOT in `.speech` state (mid-utterance dips are pauses, not
+    // ambient noise, and must not move the floor — see `updateNoiseFloor`).
+    // The one wrinkle is the "stuck loud room" case: if ambient noise is
+    // already above the seeded threshold, every chunk classifies as speech
+    // forever, `.speech` perpetually hits `maxSegmentDuration` and discards
+    // into `.awaitingSilence` — but chunks there STILL classify as speech
+    // relative to the frozen threshold, so the segmenter can never observe a
+    // silence-classified chunk to teach the floor the room's real level.
+    // The chosen escape mechanism (single, clean rule): while in
+    // `.awaitingSilence`, update the floor unconditionally — using the normal
+    // alpha for chunks that already read as silence, and a slower "unstick"
+    // alpha for chunks that still read as speech. That slower nudge is what
+    // guarantees convergence in the loud-room case (see
+    // `AdaptiveNoiseFloorTests.testLoudRoomConvergesToAboveAmbientWithinBound`
+    // for the worked numbers and a synthetic regression test).
+
+    /// EMA smoothing factor for silence-classified chunks (`.silence`, or
+    /// `.awaitingSilence` chunks that already read below the current
+    /// threshold). Small on purpose: the floor should track slow ambient
+    /// drift, not jitter on every quiet chunk.
+    private static let noiseFloorAlpha: Float = 0.05
+
+    /// EMA smoothing factor for the `.awaitingSilence` "unstick" path: chunks
+    /// that still read ABOVE the current effective threshold while the
+    /// segmenter is waiting out a max-duration discard. Deliberately slower
+    /// than `noiseFloorAlpha` — it must not let a single loud moment swing
+    /// the floor, only grind it upward over repeated chunks until a
+    /// persistently loud room's ambient level is finally recognized as "the
+    /// new silence".
+    private static let noiseFloorAlphaUnstick: Float = 0.01
+
+    /// Multiplier from noise floor to classification threshold: keeps the
+    /// cutoff comfortably above ambient noise (so normal room tone never
+    /// misclassifies as speech) while staying low enough that real speech —
+    /// typically several multiples of ambient RMS — still crosses it.
+    private static let noiseFloorMultiplier: Float = 3.5
+
+    /// Absolute floor on the effective threshold: even a dead-silent room
+    /// (noise floor near zero) must not classify near-zero-RMS noise/whispers
+    /// as speech by dropping the cutoff too low.
+    private static let effectiveThresholdMin: Float = 0.004
+
+    /// Absolute ceiling on the effective threshold: bounds how loud
+    /// "silence" can be considered, so a pathological input can't push the
+    /// segmenter into treating literally everything as noise forever.
+    private static let effectiveThresholdMax: Float = 0.06
+
+    private var noiseFloor: Float
+    private var noiseFloorSeeded = false
+
+    /// Effective speech/silence classification cutoff. Equal to
+    /// `config.speechRMSThreshold` when `config.adaptiveThreshold` is
+    /// `false` (or before the floor has been seeded); otherwise
+    /// `clamp(noiseFloor * noiseFloorMultiplier, effectiveThresholdMin,
+    /// effectiveThresholdMax)`. Exposed for observability (calibration
+    /// logging in `WakeListener`).
+    public private(set) var effectiveThreshold: Float
+
     // MARK: - Initialization
     public init(config: SegmenterConfig, sampleRate: Double = 16_000) {
         self.config = config
         self.sampleRate = sampleRate
+        self.effectiveThreshold = config.speechRMSThreshold
+        self.noiseFloor = config.speechRMSThreshold / Self.noiseFloorMultiplier
     }
 
     // MARK: - Main processing
@@ -107,21 +191,34 @@ public final class SpeechSegmenter {
             return .none
         }
 
-        let isSpeech = rms >= config.speechRMSThreshold
+        let classificationThreshold = config.adaptiveThreshold ? effectiveThreshold : config.speechRMSThreshold
+        let isSpeech = rms >= classificationThreshold
+        // Captured BEFORE this chunk's state transition: floor updates gate
+        // on the state the segmenter was in WHILE this chunk was observed,
+        // not whatever it transitions to as a result of processing it.
+        let stateDuringClassification = state
 
+        let event: SegmenterEvent
         switch state {
         case .silence:
-            return processSilenceState(chunk: chunk, isSpeech: isSpeech)
+            event = processSilenceState(chunk: chunk, isSpeech: isSpeech)
 
         case .speech:
-            return processSpeechState(chunk: chunk, isSpeech: isSpeech)
+            event = processSpeechState(chunk: chunk, isSpeech: isSpeech)
 
         case .awaitingSilence:
-            return processAwaitingSilenceState(chunk: chunk, isSpeech: isSpeech)
+            event = processAwaitingSilenceState(chunk: chunk, isSpeech: isSpeech)
         }
+
+        if config.adaptiveThreshold {
+            updateNoiseFloor(rms: rms, isSpeech: isSpeech, state: stateDuringClassification)
+        }
+
+        return event
     }
 
-    /// Reset the segmenter to initial state (silence, empty buffers).
+    /// Reset the segmenter to initial state (silence, empty buffers, and the
+    /// adaptive noise floor back to its initial floor-seed value).
     public func reset() {
         state = .silence
         preRollBuffer = []
@@ -129,6 +226,55 @@ public final class SpeechSegmenter {
         trailingModeSilenceSamples = []
         accumulatedSampleCount = 0
         accumulatedSilenceSamples = 0
+        noiseFloor = config.speechRMSThreshold / Self.noiseFloorMultiplier
+        noiseFloorSeeded = false
+        effectiveThreshold = config.speechRMSThreshold
+    }
+
+    // MARK: - Helper: Adaptive noise floor
+    /// Update the noise floor EMA and recompute `effectiveThreshold`.
+    /// - Parameters:
+    ///   - rms: RMS of the chunk just classified.
+    ///   - isSpeech: The classification result for that chunk.
+    ///   - state: The segmenter's state WHILE that chunk was classified
+    ///     (i.e. before this chunk's own transition).
+    private func updateNoiseFloor(rms: Float, isSpeech: Bool, state: State) {
+        guard noiseFloorSeeded else {
+            // Seed with the first silence chunk's RMS; if the very first
+            // chunk ever observed is speech, seed with the configured
+            // threshold/multiplier instead so effectiveThreshold has a
+            // sane, immediately-consistent starting point
+            // (seed * multiplier == speechRMSThreshold).
+            noiseFloor = isSpeech ? (config.speechRMSThreshold / Self.noiseFloorMultiplier) : rms
+            noiseFloorSeeded = true
+            recomputeEffectiveThreshold()
+            return
+        }
+
+        switch state {
+        case .speech:
+            // Frozen: mid-utterance dips are pauses, not ambient noise, and
+            // prolonged speech must never inflate the floor.
+            return
+
+        case .silence:
+            guard !isSpeech else { return }
+            noiseFloor = noiseFloor * (1 - Self.noiseFloorAlpha) + rms * Self.noiseFloorAlpha
+
+        case .awaitingSilence:
+            // See the class-level doc comment above `noiseFloorAlphaUnstick`:
+            // this branch is what guarantees convergence in a loud room where
+            // every chunk would otherwise read as speech forever.
+            let alpha = isSpeech ? Self.noiseFloorAlphaUnstick : Self.noiseFloorAlpha
+            noiseFloor = noiseFloor * (1 - alpha) + rms * alpha
+        }
+
+        recomputeEffectiveThreshold()
+    }
+
+    private func recomputeEffectiveThreshold() {
+        let raw = noiseFloor * Self.noiseFloorMultiplier
+        effectiveThreshold = min(max(raw, Self.effectiveThresholdMin), Self.effectiveThresholdMax)
     }
 
     // MARK: - State machine transitions
