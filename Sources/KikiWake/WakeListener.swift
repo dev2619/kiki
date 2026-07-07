@@ -24,17 +24,22 @@ public protocol WakeListenerDelegate: AnyObject {
 /// ## Disciplina de concurrencia
 /// Todo el estado mutable (`_state`, `segmenter`, la tarea de transcripción en
 /// vuelo, la tarea de timeout de desarmado, `session`, `disarmGeneration`,
-/// `hasCapturedInSession`, los contadores de calibración RMS) está confinado
-/// a `queue`, una cola serial que es también la cola en la que se despachan
-/// los callbacks del tap de audio. `SpeechSegmenter` no es thread-safe, así
-/// que mantenerlo en una única cola serial evita cualquier acceso concurrente
-/// sin necesitar locks. Los métodos públicos
+/// `notificationEpoch`, `hasCapturedInSession`, los contadores de calibración
+/// RMS) está confinado a `queue`, una cola serial que es también la cola en
+/// la que se despachan los callbacks del tap de audio. `SpeechSegmenter` no
+/// es thread-safe, así que mantenerlo en una única cola serial evita
+/// cualquier acceso concurrente sin necesitar locks. Los métodos públicos
 /// (`start`/`resumeArmed`/`stop`/`cancelCapture`) despachan de forma síncrona
 /// sobre `queue` para que el caller observe el efecto (o el throw) antes de
 /// retornar. El accessor público `state` también usa `queue.sync`, por lo que
 /// el código interno que ya corre sobre `queue` debe usar `_state` para
 /// evitar deadlock por reentrancia. Los eventos hacia el delegate —que es
-/// `@MainActor`— saltan siempre con `Task { @MainActor in ... }`.
+/// `@MainActor`— saltan siempre con `Task { @MainActor in ... }`, y esa Task
+/// vuelve a entrar a `queue` (vía `queue.sync`, ver `notify()` y doc de
+/// `notificationEpoch`) para verificar que no haya quedado stale por un
+/// `stop()` concurrente antes de invocar al delegate — deadlock-free por la
+/// misma invariante que ya cubre el accessor `state`: nada que corre sobre
+/// `queue` espera síncronamente al MainActor.
 /// `@unchecked Sendable`: todo el estado mutable está confinado a `queue`
 /// (ver disciplina de concurrencia arriba); no hay acceso concurrente real,
 /// solo lo que el checker no puede probar automáticamente por sí solo.
@@ -117,6 +122,33 @@ public final class WakeListener: @unchecked Sendable {
     /// un cancel() disparado casi al mismo tiempo (p.ej. por speechStarted).
     private var disarmGeneration = 0
 
+    /// Incrementado únicamente en `stop()`. Fencing de las notificaciones al
+    /// delegate (ver `notify()`): una notificación ya despachada a la cola
+    /// del delegate (MainActor) antes de que `stop()` invalide la sesión no
+    /// debe poder actuar después de ese `stop()`.
+    ///
+    /// Carrera concreta que motiva esto: un segmento armado termina y
+    /// `handle()` ya corrió en `queue`, encolando `notify { $0.wakeListenerDidCapture(...) }`
+    /// como una `Task { @MainActor in ... }` — justo cuando el usuario
+    /// presiona Fn. El hotkey dispara su propio `Task { @MainActor in ... }`
+    /// que transiciona `DictationController` a `.recording`, y
+    /// `dictationStateDidChange(.recording)` llama a `wakeListener.stop()`
+    /// (síncrono sobre `queue`, invalida `session`). Si esa segunda Task
+    /// corre en el MainActor ANTES que la primera (el orden entre dos
+    /// `Task { @MainActor }` encoladas por separado no es FIFO garantizado),
+    /// la notificación de captura llega STALE: `AppDelegate` fija
+    /// `resumeAsArmed = true` y llama a `controller.process(samples:)`, que
+    /// descarta las muestras (`state != .idle`) pero deja `resumeAsArmed`
+    /// pegado en `true` — al terminar el dictado por hotkey, el resume
+    /// rearmaría el micrófono sin frase ni chime (regresión de privacidad).
+    /// Con este fence, `notify` captura `notificationEpoch` en el momento del
+    /// despacho (sobre `queue`) y la Task en MainActor la vuelve a leer
+    /// (`queue.sync`, deadlock-free por la misma invariante que ya usa el
+    /// accessor `state`: nada que corre sobre `queue` espera síncronamente al
+    /// MainActor) justo antes de invocar la acción — si `stop()` corrió en el
+    /// medio, el epoch ya cambió y la notificación se descarta sin efecto.
+    private var notificationEpoch = 0
+
     /// Contador acumulado de muestras entregadas por el tap desde `start()`,
     /// usado para medir la ventana de `postArmSuppression` sin depender de
     /// timers de wall-clock (consistente con que todo lo demás en esta clase
@@ -136,8 +168,8 @@ public final class WakeListener: @unchecked Sendable {
     /// entregado ya una captura.
     private var hasCapturedInSession = false
 
-    /// Pico de RMS observado en la ventana de calibración vigente (solo
-    /// mientras `_state == .listening`); ver `calibrationWindowsLogged`.
+    /// Pico de RMS observado en la ventana de calibración vigente (mientras
+    /// `_state == .listening` o `.armed`); ver `calibrationWindowsLogged`.
     private var calibrationPeakRMS: Float = 0
     /// Muestras acumuladas dentro de la ventana de calibración vigente,
     /// usado para medir los 10s por conteo de muestras (sin `Date()`).
@@ -241,6 +273,10 @@ public final class WakeListener: @unchecked Sendable {
             transcriptionTask = nil
             isTranscribing = false
             session += 1
+            // Ver doc de `notificationEpoch`: invalida cualquier notificación
+            // al delegate que ya haya sido despachada (Task@MainActor
+            // encolada) pero que todavía no haya corrido.
+            notificationEpoch += 1
             segmenter.reset()
             _state = .stopped
             KikiLog.log("kiki wake: detenido")
@@ -302,7 +338,10 @@ public final class WakeListener: @unchecked Sendable {
     }
 
     /// Diagnóstico de calibración: registra el pico de RMS visto en modo
-    /// `.listening` en ventanas de 10s (medidas por conteo de muestras, no
+    /// `.listening` o `.armed` (el nivel de mic es igual de útil en ambos —
+    /// una sesión armada puede pasar buena parte de sus 45s de timeout en
+    /// silencio entre utterances, y esos datos de RMS ambiente también sirven
+    /// para calibrar) en ventanas de 10s (medidas por conteo de muestras, no
     /// `Date()`, consistente con `postArmSuppression`), y loggea solo las
     /// primeras `calibrationMaxWindows` (6) ventanas desde el último
     /// `start()`/`resumeArmed()` — evita ensuciar el log indefinidamente
@@ -311,7 +350,7 @@ public final class WakeListener: @unchecked Sendable {
     private func trackCalibrationWindow(chunk: [Float], rms: Float) {
         dispatchPrecondition(condition: .onQueue(queue))
         guard calibrationWindowsLogged < Self.calibrationMaxWindows else { return }
-        if _state == .listening {
+        if _state == .listening || _state == .armed {
             calibrationPeakRMS = max(calibrationPeakRMS, rms)
         }
         calibrationWindowSampleCount += chunk.count
@@ -466,8 +505,17 @@ public final class WakeListener: @unchecked Sendable {
     // MARK: - Delegate hop
 
     private func notify(_ action: @escaping @MainActor (WakeListenerDelegate) -> Void) {
+        dispatchPrecondition(condition: .onQueue(queue))
         guard let delegate else { return }
+        // Fence contra un `stop()` concurrente — ver doc de
+        // `notificationEpoch` para la carrera exacta que esto cierra.
+        let capturedEpoch = notificationEpoch
         Task { @MainActor in
+            let stillValid = self.queue.sync { capturedEpoch == self.notificationEpoch }
+            guard stillValid else {
+                KikiLog.log("kiki wake: notificación descartada (epoch stale, stop() concurrente)")
+                return
+            }
             action(delegate)
         }
     }

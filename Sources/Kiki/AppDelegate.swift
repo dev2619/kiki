@@ -273,6 +273,22 @@ extension AppDelegate: DictationControllerDelegate {
     func dictationStateDidChange(_ state: DictationState) {
         hud.show(state: state)
 
+        // Belt-and-suspenders contra `resumeAsArmed` stale: `.recording`
+        // SOLO puede originarse en el hotkey — el flujo manos-libres
+        // (`wakeListenerDidCapture`/`wakeListenerDidCaptureSameBreath`) va
+        // directo a `.processing` vía `DictationController.transcribeAndProcess`,
+        // nunca pasa por `.recording`. Si una notificación de captura
+        // manos-libres stale (carrera con un `stop()` concurrente — fenced en
+        // `WakeListener.notify`, pero esto es un segundo cinturón) alcanzó a
+        // fijar `resumeAsArmed = true` justo antes de que el usuario tomara
+        // control manual con Fn, este reset la limpia al arrancar la pausa
+        // originada por el hotkey — así el resume al soltar Fn usa `start()`
+        // (listening simple) y no `resumeArmed()` (mic armado sin frase ni
+        // chime, regresión de privacidad).
+        if state == .recording {
+            resumeAsArmed = false
+        }
+
         // Coordinación de pausa: evita dos engines de audio simultáneos (el
         // AudioRecorder del dictado por hotkey y el AVAudioEngine interno de
         // WakeListener) y evita que el propio audio del dictado dispare
