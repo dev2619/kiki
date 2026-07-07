@@ -13,8 +13,14 @@ public enum KikiLog {
         return dir.appendingPathComponent("kiki.log")
     }()
 
+    /// true cuando el proceso es un test runner (XCTest) — los tests no deben
+    /// escribir al kiki.log real del usuario (confunde el diagnóstico en campo).
+    private static let isTestRun =
+        ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
+
     public static func log(_ message: String) {
         NSLog("%@", message)
+        guard !isTestRun else { return }
         let line = "\(formatter.string(from: Date())) \(message)\n"
         queue.async {
             guard let data = line.data(using: .utf8) else { return }
