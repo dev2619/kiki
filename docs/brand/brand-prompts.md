@@ -31,39 +31,55 @@ tall rounded bar, dot, tall rounded bar, dot — evoking both a soundwave and
 the brand name.
 ```
 
-## 1. Logo de producto / app icon (master)
+## 1. Logo de producto (símbolo solo — SIN texto, el uso primario de marca)
 
 ```
 [BLOQUE DE FUNDACIÓN]
-App icon for macOS, rounded-square squircle on warm cream #FAF7F2 background.
-Centered composition: the signature kiki waveform mark (tall bar, dot, tall
-bar, dot) in violet gradient, floating above the lowercase wordmark "kiki" in
-a soft rounded geometric sans-serif, deep ink #22263A, slightly plump friendly
-letterforms. Perfect symmetry, crisp vector edges, no shadows, no 3D, no
-texture. Flat minimal design, production-ready app icon.
+Standalone product logomark, NO text, no letters anywhere: only the kiki
+signature mark — a 4-element abstract voice waveform: tall rounded vertical
+bar, small circle dot, tall rounded vertical bar, small circle dot, evenly
+spaced on one baseline. Vertical violet gradient #7C5CFC → #A78BFA on all four
+elements. Transparent background, PNG with alpha. Perfectly symmetric, crisp
+flat vector, monoline weight, no container shape, no shadows, no 3D.
 ```
 
-## 2. Símbolo solo (favicon, menu bar, avatar pequeño)
-
-```
-[BLOQUE DE FUNDACIÓN]
-Standalone abstract logomark, no text: only the kiki 4-element voice waveform
-(tall rounded bar, dot, tall rounded bar, dot) in solid violet #7C5CFC on
-transparent background. Monoline weight, perfectly balanced spacing, works at
-16px. Flat vector, single color version.
-```
-
-## 3. Wordmark horizontal (web, documentos)
+## 2. App icon macOS (símbolo en squircle — SIN texto)
 
 ```
 [BLOQUE DE FUNDACIÓN]
-Horizontal lockup: lowercase wordmark "kiki" in rounded geometric sans-serif,
-deep ink #22263A, with the two "i" letters topped by violet #7C5CFC dots that
-echo the waveform mark. To the left, the 4-element waveform symbol in violet
-gradient. Clean baseline alignment, flat vector on white background.
+macOS app icon, rounded-square squircle shape filled with warm cream #FAF7F2.
+Centered, large and breathing: ONLY the kiki signature mark — tall rounded
+bar, dot, tall rounded bar, dot — in vertical violet gradient #7C5CFC →
+#A78BFA. NO text, no letters, no wordmark. The mark occupies ~55% of the icon
+width, optically centered. Crisp flat vector edges, subtle even margins, no
+shadows, no 3D, no texture. Production-ready macOS Big Sur style app icon, PNG.
 ```
 
-## 4. Imaginería comercial (hero / landing / social)
+## 3. Ícono de barra de menú (glifo transparente — template)
+
+```
+[BLOQUE DE FUNDACIÓN]
+macOS menu bar status icon (template image): the kiki signature mark ONLY —
+tall rounded bar, dot, tall rounded bar, dot — as a SINGLE SOLID BLACK glyph
+(#000000) on a FULLY TRANSPARENT background, PNG with alpha channel. No
+container, no background shape, no circle, no square, no text, no gradient,
+one flat color. Monoline stroke weight balanced to stay legible at 18x18
+pixels. Perfectly centered with even padding, crisp vector edges.
+```
+
+(macOS lo tiñe solo: negro sólido + alfa = se adapta a barra clara/oscura.)
+
+## 4. Wordmark horizontal (SOLO para web/documentos — único uso con texto)
+
+```
+[BLOQUE DE FUNDACIÓN]
+Horizontal lockup for web headers only: the kiki signature mark (violet
+gradient) followed by the lowercase wordmark "kiki" in a soft rounded
+geometric sans-serif, deep ink #22263A. Transparent background, PNG with
+alpha. Clean baseline alignment, flat vector.
+```
+
+## 5. Imaginería comercial (hero / landing / social)
 
 Plantilla — cambiar solo la [ESCENA]:
 
@@ -82,7 +98,7 @@ Escenas listas:
 - `a shield formed by voice waves — privacy concept, everything stays inside a Mac silhouette`
 - `hands-free moment: person cooking/walking while violet waves travel to a laptop across the room`
 
-## 5. Lista negativa (añadir si el generador lo soporta)
+## 6. Lista negativa (añadir si el generador lo soporta)
 
 ```
 --no photorealism, 3D render, skeuomorphism, drop shadows, neon glow, robot
@@ -93,6 +109,6 @@ faces, microphone clipart, extra colors, busy backgrounds, text other than "kiki
 
 1. **Nunca** cambies los hex ni añadas colores; el violeta va SOLO en elementos de voz/sonido.
 2. Reutiliza la MISMA imagen del ícono actual como **referencia de imagen** cuando el generador lo permita (Midjourney `--sref`, gpt-image con imagen adjunta) + fija seed si existe.
-3. "kiki" siempre en minúsculas, tipografía redondeada; jamás mayúsculas ni serif.
+3. El texto "kiki" SOLO aparece en el wordmark de web/documentos — logo de producto, app icon y menu bar son símbolo puro sin letras. Cuando aparezca: minúsculas, redondeada, jamás serif.
 4. El símbolo abstracto (barra-punto-barra-punto) es la unidad mínima de marca — si algo lleva marca, lleva eso.
 5. Una generación por concepto → elegir → iterar sobre la elegida con "same style, but ..." en vez de regenerar de cero.
