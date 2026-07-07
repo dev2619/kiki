@@ -467,7 +467,7 @@ public final class WakeListener: @unchecked Sendable {
         guard calibrationWindowsLogged < Self.calibrationMaxWindows,
               calibrationWindowSampleCount > 0 else { return }
         let seconds = Double(calibrationWindowSampleCount) / Self.sampleRate
-        KikiLog.log("kiki wake: pico RMS ventana parcial (\(String(format: "%.1f", seconds))s): \(String(format: "%.4f", calibrationPeakRMS)) (umbral efectivo \(String(format: "%.4f", segmenter.effectiveThreshold)))")
+        KikiLog.log("kiki wake: pico RMS ventana parcial (\(String(format: "%.1f", seconds))s): \(String(format: "%.4f", calibrationPeakRMS)) (umbral \(String(format: "%.4f", segmenter.effectiveThreshold)) / salida \(String(format: "%.4f", segmenter.exitThreshold)))")
         calibrationPeakRMS = 0
         calibrationWindowSampleCount = 0
     }
@@ -552,7 +552,12 @@ public final class WakeListener: @unchecked Sendable {
         // valor diagnóstico. Con el umbral adaptativo, ver cuánto se movió
         // respecto al pico de RMS es exactamente lo que permite confirmar en
         // campo que el aprendizaje del piso de ruido está funcionando.
-        KikiLog.log("kiki wake: pico RMS últimos 10s: \(String(format: "%.4f", calibrationPeakRMS)) (umbral efectivo \(String(format: "%.4f", segmenter.effectiveThreshold)))")
+        // También se loggea `exitThreshold` (umbral de salida de la
+        // histéresis, ver `SpeechSegmenter.exitThreshold`): permite confirmar
+        // en campo, contra los picos de RMS reales, si el habla suave
+        // (finales de palabra, sílabas átonas) queda por encima de ese umbral
+        // más bajo — la mitigación al corte prematuro de dictados.
+        KikiLog.log("kiki wake: pico RMS últimos 10s: \(String(format: "%.4f", calibrationPeakRMS)) (umbral \(String(format: "%.4f", segmenter.effectiveThreshold)) / salida \(String(format: "%.4f", segmenter.exitThreshold)))")
         calibrationPeakRMS = 0
         calibrationWindowSampleCount = 0
     }

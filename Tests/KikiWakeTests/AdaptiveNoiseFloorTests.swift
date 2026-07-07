@@ -122,8 +122,8 @@ final class AdaptiveNoiseFloorTests: XCTestCase {
 
     func testEffectiveThresholdClampedToMaximum() {
         // Seed with a huge configured threshold so the very first (speech)
-        // chunk seeds the floor via the threshold/3.5 fallback already above
-        // the max clamp.
+        // chunk seeds the floor via the threshold/noiseFloorMultiplier
+        // fallback already above the max clamp.
         let config = SegmenterConfig(speechRMSThreshold: 1.0, adaptiveThreshold: true)
         let segmenter = SpeechSegmenter(config: config)
 
@@ -155,12 +155,15 @@ final class AdaptiveNoiseFloorTests: XCTestCase {
     // effectiveThreshold finally exceeds the room's real ambient level.
     //
     // Worked numbers (see constants in SpeechSegmenter): noiseFloorAlphaUnstick
-    // = 0.01, noiseFloorMultiplier = 3.5, seed = 0.008 / 3.5 = 0.0022857.
-    // Target: noiseFloor > 0.03 / 3.5 = 0.0085714 (so effectiveThreshold > 0.03).
-    // Solving 0.03 - (0.03 - 0.0022857) * 0.99^n > 0.0085714 gives n ~= 25.6,
-    // i.e. 26 awaitingSilence chunks (2.6s, confirmed by direct simulation) —
-    // the bound asserted below is 3.5s measured FROM the "máximo" discard
-    // that enters `.awaitingSilence` (26 chunks + margin for constant drift).
+    // = 0.01, noiseFloorMultiplier = 2.5 (lowered from 3.5 for soft-speaker
+    // headroom, see fix/soft-speech-truncation), seed = 0.008 / 2.5 = 0.0032.
+    // Target: noiseFloor > 0.03 / 2.5 = 0.012 (so effectiveThreshold > 0.03).
+    // Solving 0.03 - (0.03 - 0.0032) * 0.99^n > 0.012 gives n ~= 39.6, i.e. 40
+    // awaitingSilence chunks (4.0s, confirmed by direct simulation) — the
+    // bound asserted below is 4.5s measured FROM the "máximo" discard that
+    // enters `.awaitingSilence` (40 chunks + margin for constant drift). The
+    // gentler multiplier trades a longer worst-case convergence time (was
+    // 2.6s at 3.5x) for a lower entry threshold that soft speakers can clear.
     //
     // Beyond the threshold crossing, this test also proves the state machine
     // actually RECOVERS: post-convergence ambient chunks classify as silence,
@@ -177,8 +180,8 @@ final class AdaptiveNoiseFloorTests: XCTestCase {
         let segmenter = SpeechSegmenter(config: config)
 
         let loudRMS: Float = 0.03
-        let postDiscardConvergenceBoundSeconds = 3.5
-        let maxChunks = 60 // 6s of ambient input, ample room past the bound
+        let postDiscardConvergenceBoundSeconds = 4.5
+        let maxChunks = 80 // 8s of ambient input, ample room past the bound
 
         var maximoDiscardChunk: Int?
         var convergedAtChunk: Int?
@@ -225,7 +228,7 @@ final class AdaptiveNoiseFloorTests: XCTestCase {
     // Critical interaction found in review: WakeListener recreates its
     // SpeechSegmenter at every regime transition (arm(), start(),
     // resumeArmed(), cancelCapture(), disarm timeout). If each fresh
-    // instance reseeds at threshold/3.5, the floor learned by the previous
+    // instance reseeds at threshold/noiseFloorMultiplier, the floor learned by the previous
     // instance dies with it: in the loud-room field scenario the LISTENING
     // segmenter converges, the wake phrase finally matches, and then arm()
     // hands the user an ARMED segmenter (maxSegmentDuration 30s!) that is

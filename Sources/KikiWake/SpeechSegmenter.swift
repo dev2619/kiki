@@ -148,7 +148,38 @@ public final class SpeechSegmenter {
     /// cutoff comfortably above ambient noise (so normal room tone never
     /// misclassifies as speech) while staying low enough that real speech —
     /// typically several multiples of ambient RMS — still crosses it.
-    private static let noiseFloorMultiplier: Float = 3.5
+    ///
+    /// Lowered from 3.5 to 2.5 (soft-speaker headroom): field evidence
+    /// showed dictations captured at only 1.3-1.6s for obviously longer
+    /// sentences, with the effective threshold (0.0143) sitting only ~1.6x
+    /// below observed speech peaks (0.0215-0.0244). At 3.5x, quieter
+    /// speakers' word endings and unstressed syllables routinely fell below
+    /// the cutoff, got classified as silence, and armed `endSilence` mid-
+    /// sentence. 2.5x keeps the same ambient-noise rejection margin (still
+    /// comfortably above room tone) while giving soft speech more headroom
+    /// to clear the entry threshold. See also `exitThresholdRatio` below,
+    /// which addresses the complementary half of the same bug (soft speech
+    /// dipping below threshold mid-utterance, once already speaking).
+    private static let noiseFloorMultiplier: Float = 2.5
+
+    /// Hysteresis ratio (adaptive mode only): once a chunk has already been
+    /// classified as speech (`state == .speech`), subsequent chunks only
+    /// need to clear `effectiveThreshold * exitThresholdRatio` — a lower bar
+    /// than the entry threshold — to still count as speech. This is the
+    /// classic enter/exit hysteresis fix for the soft-speech truncation bug:
+    /// word endings and unstressed syllables commonly dip 30-50% below the
+    /// entry threshold while remaining continuous speech. Without
+    /// hysteresis, each such dip gets classified as silence and starts
+    /// arming the `endSilence` countdown, which can expire DURING a quiet
+    /// portion of an ongoing sentence and cut it off mid-utterance. With
+    /// hysteresis, only audio that drops below the (lower) exit threshold —
+    /// i.e. genuinely quiet, not just a soft syllable — starts that clock.
+    ///
+    /// Deliberately scoped to adaptive mode only: fixed mode's single-
+    /// threshold classification is exercised by the 18 legacy
+    /// `SpeechSegmenterTests`, which encode that exact semantics and must
+    /// not change.
+    private static let exitThresholdRatio: Float = 0.55
 
     /// Absolute floor on the effective threshold: even a dead-silent room
     /// (noise floor near zero) must not classify near-zero-RMS noise/whispers
@@ -182,6 +213,16 @@ public final class SpeechSegmenter {
     /// effectiveThresholdMax)`. Exposed for observability (calibration
     /// logging in `WakeListener`).
     public private(set) var effectiveThreshold: Float
+
+    /// Hysteresis exit threshold used while ALREADY in `.speech` state
+    /// (adaptive mode only): `effectiveThreshold * exitThresholdRatio`, i.e.
+    /// a lower bar than the entry threshold so soft trailing speech doesn't
+    /// get misclassified as silence mid-utterance. See `exitThresholdRatio`
+    /// for the full rationale. Exposed for observability alongside
+    /// `effectiveThreshold` (calibration logging in `WakeListener`).
+    public var exitThreshold: Float {
+        effectiveThreshold * Self.exitThresholdRatio
+    }
 
     // MARK: - Initialization
     /// - Parameters:
@@ -218,7 +259,22 @@ public final class SpeechSegmenter {
             return .none
         }
 
-        let classificationThreshold = config.adaptiveThreshold ? effectiveThreshold : config.speechRMSThreshold
+        // Hysteresis (adaptive mode only, see `exitThresholdRatio`): once
+        // already classified as `.speech`, a chunk only needs to clear the
+        // lower exit threshold to remain speech; entering speech from
+        // `.silence`/`.awaitingSilence` still requires the full entry
+        // threshold. Fixed mode keeps the legacy single-threshold check
+        // untouched — the 18 `SpeechSegmenterTests` encode that semantics.
+        let classificationThreshold: Float
+        if config.adaptiveThreshold {
+            if case .speech = state {
+                classificationThreshold = exitThreshold
+            } else {
+                classificationThreshold = effectiveThreshold
+            }
+        } else {
+            classificationThreshold = config.speechRMSThreshold
+        }
         let isSpeech = rms >= classificationThreshold
         // Captured BEFORE this chunk's state transition: floor updates gate
         // on the state the segmenter was in WHILE this chunk was observed,
