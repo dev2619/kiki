@@ -462,22 +462,61 @@ public final class WakeListener: @unchecked Sendable {
     /// `stop()`/`cancelCapture()` sin cambios — esos son "pausar" o
     /// "cancelar", no "ya terminé de hablar", y no deben insertar texto que
     /// el usuario no pidió pegar en ese momento.
+    ///
+    /// PRIVACIDAD (regresión encontrada en review): el volcado SOLO ocurre en
+    /// `.armed` — una sesión de dictado real que el usuario abrió (frase o
+    /// ⌥⌘K). En `.listening` todavía se está esperando la frase de
+    /// activación, y cualquier segmento en curso es conversación ambiente NO
+    /// dirigida a kiki; volcarla la transcribiría y pegaría en la app
+    /// enfocada (fuga de audio de terceros). Por eso `.listening` cae al
+    /// mismo teardown que `stop()` liso (descarta), sin volcado.
     public func stopAndFlush() {
         queue.sync {
             guard _state != .stopped else { return }
+            // Solo una sesión ARMADA lleva dictado que el usuario pidió
+            // capturar (ver PRIVACIDAD arriba). En `.listening` se descarta,
+            // igual que `stop()`.
+            guard _state == .armed else {
+                performStop()
+                KikiLog.log("kiki wake: detenido (listening, sin volcado)")
+                return
+            }
             let flushed = segmenter.flush()
+            // Capturar `session` ANTES de que performStop() la incremente —
+            // mismo orden que `handleSegmentEnded`/`notifyCapture` — para que
+            // el token de frescura refleje la sesión a la que pertenece el
+            // dictado volcado, sin importar el orden del caller. Como
+            // performStop() sí incrementa `session`, el token quedará stale
+            // (sessionIsCurrent == false) en la entrega: correcto, porque un
+            // apagado intencional NO debe rearmar el mic.
+            let capturedSession = session
             performStop()
             if let flushed {
                 KikiLog.log("kiki wake: manos-libres detenido intencionalmente, volcando dictado en curso (\(flushed.count) muestras)")
-                // notifyCapture (sin fence de descarte) — mismo razonamiento
-                // que `handleSegmentEnded`: esto es habla real del usuario,
-                // debe entregarse siempre; el token de frescura de sesión
-                // deja que el delegate decida los efectos de ESTADO
-                // (rearmar el mic) sin perder el dictado.
-                notifyCapture { $0.wakeListenerDidCapture(samples: flushed, sessionIsCurrent: $1) }
+                // Entrega sin fence de descarte (mismo razonamiento que
+                // `handleSegmentEnded`/`notifyCapture`): habla real del
+                // usuario, se entrega siempre; el token de frescura
+                // pre-capturado deja que el delegate decida los efectos de
+                // ESTADO (rearmar el mic) sin perder el dictado.
+                deliverFlushedCapture(flushed, capturedSession: capturedSession)
             } else {
                 KikiLog.log("kiki wake: manos-libres detenido intencionalmente (sin habla en curso que volcar)")
             }
+        }
+    }
+
+    /// Entrega de una captura VOLCADA por `stopAndFlush()`: gemela de
+    /// `notifyCapture`, pero recibe la `session` pre-capturada como parámetro
+    /// (en vez de leerla al despachar) porque `performStop()` ya la
+    /// incrementó para cuando llegamos aquí — ver el comentario en
+    /// `stopAndFlush`. Nunca descarta; el token de frescura solo gatea los
+    /// efectos de estado en el delegate.
+    private func deliverFlushedCapture(_ samples: [Float], capturedSession: Int) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        guard let delegate else { return }
+        Task { @MainActor in
+            let sessionIsCurrent = self.queue.sync { capturedSession == self.session }
+            delegate.wakeListenerDidCapture(samples: samples, sessionIsCurrent: sessionIsCurrent)
         }
     }
 
@@ -886,3 +925,39 @@ public final class WakeListener: @unchecked Sendable {
         }
     }
 }
+
+#if DEBUG
+// Test-only seams (compiled out of Release builds, so `make bundle` never
+// ships them). They let `WakeListenerFlushTests` drive the state machine
+// deterministically WITHOUT bringing up a live `AVAudioEngine` — the tap
+// cannot be fed synthetic audio from a test, and a real engine delivers
+// nondeterministic silent chunks that would race the injected ones. Both
+// hooks stay confined to `queue`, exactly like the production paths.
+extension WakeListener {
+    /// Place the listener in `state` with a fresh segmenter for that regime,
+    /// bypassing `start()`/`armDirectly()`'s audio-engine bring-up.
+    func _testActivate(_ state: State) {
+        queue.sync {
+            resetSessionCounters()
+            hasCapturedInSession = false
+            switch state {
+            case .listening:
+                segmenter = makeSegmenter(config: listeningConfig)
+                _state = .listening
+            case .armed:
+                segmenter = makeSegmenter(config: armedConfig)
+                _state = .armed
+            case .stopped:
+                _state = .stopped
+            }
+        }
+    }
+
+    /// Feed one synthetic chunk through the same `handle(chunk:rms:)` path the
+    /// audio tap uses.
+    func _testIngest(rms: Float, chunkSamples: Int = 1600) {
+        let chunk = [Float](repeating: 0, count: chunkSamples)
+        queue.sync { handle(chunk: chunk, rms: rms) }
+    }
+}
+#endif

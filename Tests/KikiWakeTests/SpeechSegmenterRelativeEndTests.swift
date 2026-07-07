@@ -180,4 +180,72 @@ final class SpeechSegmenterRelativeEndTests: XCTestCase {
             return
         }
     }
+
+    // MARK: - (d) A loud transient must NOT permanently truncate the utterance
+    //
+    // Regression test for the Critical-2 review finding: with an UNBOUNDED
+    // running max, a single loud transient (an emphasized word, a door slam)
+    // would raise the relative end bar (max(exit, peak*0.35)) for the rest of
+    // the utterance, so normal speech after it classified as silence and the
+    // segment ended mid-sentence — reproduced even in a quiet room. The fix is
+    // a WINDOWED peak (~2s), so the transient's influence expires.
+    //
+    // Worked numbers (16kHz, 0.1s chunks, peakWindowSeconds = 2.0 -> 20
+    // chunks, endDropRatio = 0.35): seed floor low so exitThreshold is near
+    // the min clamp. Enter and hold speech at rms 0.05 (window peak 0.05,
+    // bar max(exit, 0.0175) = 0.0175). One transient chunk at rms 0.2 pushes
+    // the window peak to 0.2, so the bar jumps to 0.07 and subsequent 0.05
+    // chunks classify as silence. endSilence here is 2.5s (25 chunks),
+    // DELIBERATELY longer than the 2.0s window so the transient ages out
+    // BEFORE endSilence could fire: after ~20 post-transient chunks the 0.2
+    // is evicted, window peak returns to 0.05, bar returns to 0.0175, and
+    // 0.05 re-classifies as speech, resetting the silence countdown.
+    //
+    // Under the OLD unbounded max, the bar would stay 0.07 forever, every
+    // 0.05 chunk would stay silence, and at 25 chunks (2.5s) the segment
+    // would falsely end — which this test's 26-chunk no-end assertion catches.
+    func testLoudTransientDoesNotPermanentlyTruncateUtterance() {
+        let config = makeConfig(endSilence: 2.5)
+        let segmenter = SpeechSegmenter(config: config)
+
+        _ = segmenter.process(chunk: chunk(), rms: 0.005) // seed floor
+
+        let started = segmenter.process(chunk: chunk(), rms: 0.05)
+        XCTAssertEqual(started, .speechStarted)
+        for _ in 0..<5 {
+            _ = segmenter.process(chunk: chunk(), rms: 0.05)
+        }
+
+        // Single loud transient.
+        _ = segmenter.process(chunk: chunk(), rms: 0.2)
+
+        // Resume normal speech at 0.05 for 26 chunks (2.6s) — longer than
+        // endSilence (2.5s). Under the buggy unbounded max this would falsely
+        // end at 2.5s; with the windowed peak the transient ages out at ~2.0s
+        // and 0.05 re-classifies as speech, so the segment must NOT end.
+        for i in 0..<26 {
+            let event = segmenter.process(chunk: chunk(), rms: 0.05)
+            if case .segmentEnded = event {
+                XCTFail("A single transient must not truncate the utterance; falsely ended at post-transient chunk \(i)")
+            }
+            if case .segmentDiscarded = event {
+                XCTFail("Unexpected discard at post-transient chunk \(i)")
+            }
+        }
+
+        // Sanity: the segment can STILL end normally once real silence
+        // (below the recovered ~0.0175 bar) sustains for endSilence.
+        var endedEvent: SegmenterEvent?
+        for _ in 0..<30 {
+            let event = segmenter.process(chunk: chunk(), rms: 0.001)
+            if case .segmentEnded = event {
+                endedEvent = event
+                break
+            }
+        }
+        guard case .segmentEnded = endedEvent ?? .none else {
+            XCTFail("Segment must still end on genuine sustained silence after the transient recovery")
+            return
+        }
+    }
 }
