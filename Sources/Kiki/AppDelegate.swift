@@ -148,15 +148,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         updateStatusIcon()
     }
 
-    /// Logo de kiki en la barra de menú (marca del producto). El estado del
-    /// modo manos libres se refleja con el sufijo "👂" junto al logo — de un
-    /// vistazo se sabe si kiki escucha ambiente continuo o solo con Fn.
-    /// Fallback al SF Symbol de micrófono si el ícono del bundle no carga.
+    /// Glifo de marca de kiki (barra-punto-barra-punto) como template image:
+    /// negro sólido + alfa, macOS lo tiñe según la barra clara/oscura igual
+    /// que los íconos del sistema. El estado del modo manos libres se refleja
+    /// con el sufijo "👂". Fallback al SF Symbol si el recurso no carga.
     private func updateStatusIcon() {
-        if let iconURL = Bundle.main.url(forResource: "AppIcon", withExtension: "icns"),
-           let logo = NSImage(contentsOf: iconURL) {
-            logo.size = NSSize(width: 20, height: 20)
-            statusItem.button?.image = logo
+        if let iconURL = Bundle.main.url(forResource: "MenuBarIcon@2x", withExtension: "png"),
+           let glyph = NSImage(contentsOf: iconURL) {
+            glyph.size = NSSize(width: 18, height: 18)
+            glyph.isTemplate = true
+            statusItem.button?.image = glyph
         } else {
             statusItem.button?.image = NSImage(
                 systemSymbolName: wakeEnabled ? "waveform" : "mic.fill",
