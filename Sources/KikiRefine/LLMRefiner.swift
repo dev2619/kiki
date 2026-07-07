@@ -64,7 +64,33 @@ public final class LLMRefiner: Refining {
     private var modelContainer: ModelContainer?
     public private(set) var isReady = false
 
+    /// Diccionario personal del usuario (Fase 3, Task 3/4).
+    ///
+    /// Contrato de threading: a diferencia de `WhisperTranscriber` (actor),
+    /// `LLMRefiner` es una clase plana sin aislamiento — `refine()` corre en
+    /// el executor concurrente donde `DictationController` (MainActor) la
+    /// invoca dentro de `withThrowingTimeout`/`withThrowingTaskGroup`
+    /// (`group.addTask { ... }` NO hereda MainActor), es decir, **fuera** de
+    /// MainActor. Una `weak var` simple es segura aquí bajo el patrón real
+    /// de uso: se fija UNA vez durante el wiring de arranque (antes de que
+    /// exista ningún dictado en vuelo) y nunca se reasigna después — no hay
+    /// escritura concurrente con las lecturas de `refine()`, así que no hace
+    /// falta lock. Si ese patrón cambiara (p. ej. reinyectar el proveedor en
+    /// caliente mientras hay refinamientos en curso), esto necesitaría un
+    /// lock o pasar a un tipo `Sendable`/actor — igual que el conformer de
+    /// `DictionaryProviding` en sí (el adapter de `KikiStore` en Task 4) debe
+    /// poder responder `terms()` desde cualquier hilo, ver nota equivalente
+    /// en `WhisperTranscriber`.
+    private weak var dictionaryProvider: DictionaryProviding?
+
     public init() {}
+
+    /// Inyecta (o quita, pasando `nil`) el proveedor del diccionario personal
+    /// que se agrega al system prompt de `RefinePrompt`. Ver nota de
+    /// threading en la propiedad `dictionaryProvider`.
+    public func setDictionaryProvider(_ provider: DictionaryProviding?) {
+        dictionaryProvider = provider
+    }
 
     /// Carga (y si hace falta descarga) el modelo. Llamar una vez al arrancar.
     public func prepare() async throws {
@@ -89,7 +115,8 @@ public final class LLMRefiner: Refining {
             throw DictationError.transcriptionFailed("LLM no cargado")
         }
 
-        let (system, user) = RefinePrompt.messages(for: text, profile: profile)
+        let dictionaryTerms = dictionaryProvider?.terms() ?? []
+        let (system, user) = RefinePrompt.messages(for: text, profile: profile, dictionaryTerms: dictionaryTerms)
         let messages: [Chat.Message] = [.system(system), .user(user)]
 
         let started = Date()

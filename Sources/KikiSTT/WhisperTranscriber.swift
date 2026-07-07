@@ -34,12 +34,39 @@ public actor WhisperTranscriber: Transcribing {
     /// kiki bloqueado en "Procesando…").
     public static let preferredModel = "large-v3_turbo_954MB"
 
+    /// Presupuesto de tokens del "initial prompt" de Whisper (`DecodingOptions.promptTokens`,
+    /// ver nota de API abajo). WhisperKit ya trunca internamente el prompt a
+    /// `(maxTokenContext / 2) - 1` tokens (`TextDecoder.swift`), pero acotamos
+    /// aparte a un valor bajo porque el glosario es una lista corta de
+    /// términos, no texto narrativo: un prompt largo compite por contexto con
+    /// la transcripción real y no aporta nada pasado cierto tamaño.
+    private static let maxDictionaryPromptTokens = 120
+
     private var whisperKit: WhisperKit?
     public private(set) var isReady = false
     /// Enlace de la cadena de serialización, ver doc del tipo.
     private var activeTranscription: Task<String, Error>?
+    /// Diccionario personal del usuario (Fase 3, Task 3/4). `weak` porque el
+    /// dueño real del ciclo de vida es el store que lo provee (wiring en
+    /// `Task 4`), no este actor.
+    ///
+    /// Contrato de threading: `terms()` se invoca desde el executor de este
+    /// actor (un hilo de fondo arbitrario, nunca garantizado que sea el
+    /// mismo entre llamadas), NO desde MainActor. El conformer de
+    /// `DictionaryProviding` (el adapter de `KikiStore` que vendrá en
+    /// Task 4) debe poder responder a `terms()` de forma segura desde
+    /// cualquier hilo — p. ej. protegiendo su estado interno con un lock o
+    /// usando una estructura de datos inmutable/copiada al leer.
+    private weak var dictionaryProvider: DictionaryProviding?
 
     public init() {}
+
+    /// Inyecta (o quita, pasando `nil`) el proveedor del diccionario personal
+    /// que se usará como initial prompt de Whisper. Es un método aislado al
+    /// actor: los llamadores externos deben hacer `await transcriber.setDictionaryProvider(...)`.
+    public func setDictionaryProvider(_ provider: DictionaryProviding?) {
+        dictionaryProvider = provider
+    }
 
     /// Carga (y si hace falta descarga) el modelo. Llamar una vez al arrancar.
     public func prepare() async throws {
@@ -87,10 +114,50 @@ public actor WhisperTranscriber: Transcribing {
         options.task = .transcribe
         options.language = language
         options.detectLanguage = false
+        // Fase 3, Task 3: diccionario personal como "initial prompt" de Whisper.
+        // API real verificada en el checkout de WhisperKit 1.0
+        // (`Sources/WhisperKit/Core/Configurations.swift` +
+        // `Core/TextDecoder.swift::prepareDecoderInputs`):
+        // `DecodingOptions.promptTokens: [Int]?` se antepone (con el token
+        // especial `startOfPreviousToken`) a los tokens de prefill del
+        // decoder — es exactamente el mecanismo de "initial prompt" de
+        // Whisper (condiciona la decodificación sin generarse a sí mismo en
+        // la salida). Requiere tokens ya codificados; se obtienen con
+        // `whisperKit.tokenizer?.encode(text:)` (protocolo `WhisperTokenizer`,
+        // `Core/Models.swift`).
+        if let promptTokens = dictionaryPromptTokens() {
+            options.promptTokens = promptTokens
+        }
         KikiLog.log("kiki stt: inferencia iniciada (\(samples.count) muestras) — la primera tras arrancar puede tardar por compilación ANE/CoreML")
         let started = Date()
         let results = try await whisperKit.transcribe(audioArray: samples, decodeOptions: options)
         KikiLog.log("kiki stt: inferencia completada en \(String(format: "%.1f", Date().timeIntervalSince(started)))s")
         return results.map(\.text).joined(separator: " ")
+    }
+
+    /// Construye los tokens del initial prompt a partir de `dictionaryProvider.terms()`,
+    /// truncando la lista de términos (no el texto a mitad de palabra) para que el
+    /// prompt tokenizado no supere `maxDictionaryPromptTokens`. Devuelve `nil` si no
+    /// hay proveedor, no hay términos, el tokenizer todavía no está disponible, o ni
+    /// siquiera el primer término entra en el presupuesto.
+    private func dictionaryPromptTokens() -> [Int]? {
+        guard let terms = dictionaryProvider?.terms(), !terms.isEmpty else { return nil }
+        guard let tokenizer = whisperKit?.tokenizer else { return nil }
+
+        var included: [String] = []
+        for term in terms {
+            let candidate = included + [term]
+            let candidateText = Self.promptText(for: candidate)
+            guard tokenizer.encode(text: candidateText).count <= Self.maxDictionaryPromptTokens else {
+                break
+            }
+            included = candidate
+        }
+        guard !included.isEmpty else { return nil }
+        return tokenizer.encode(text: Self.promptText(for: included))
+    }
+
+    private static func promptText(for terms: [String]) -> String {
+        "Glosario: " + terms.joined(separator: ", ")
     }
 }

@@ -175,4 +175,43 @@ final class RefinePromptTests: XCTestCase {
         let (_, user) = RefinePrompt.messages(for: specialText, profile: .neutral)
         XCTAssertEqual(user, specialText, "Should preserve special Spanish characters")
     }
+
+    // MARK: - Dictionary Terms (Phase 3, Task 3)
+
+    func testDictionaryTermsAppearInSystemPrompt() {
+        let (system, _) = RefinePrompt.messages(
+            for: "test", profile: .neutral, dictionaryTerms: ["Kubernetes", "Terraform"])
+        XCTAssertTrue(
+            system.contains("Términos del usuario (respeta su escritura exacta): Kubernetes, Terraform"),
+            "System prompt must include the dictionary terms line")
+    }
+
+    func testEmptyDictionaryTermsOmitsLine() {
+        let (system, _) = RefinePrompt.messages(for: "test", profile: .neutral, dictionaryTerms: [])
+        XCTAssertFalse(
+            system.contains("Términos del usuario"),
+            "System prompt must not include the dictionary terms line when empty")
+    }
+
+    func testDefaultDictionaryTermsIsEmpty() {
+        // No dictionaryTerms argument at all — existing call sites must keep compiling and behaving.
+        let (system, _) = RefinePrompt.messages(for: "test", profile: .neutral)
+        XCTAssertFalse(
+            system.contains("Términos del usuario"),
+            "Default call (no dictionaryTerms arg) must not include the dictionary terms line")
+    }
+
+    func testDictionaryTermsDoesNotAffectUserMessage() {
+        let inputText = "dictation text"
+        let (_, user) = RefinePrompt.messages(for: inputText, profile: .neutral, dictionaryTerms: ["term1"])
+        XCTAssertEqual(user, inputText, "Dictionary terms must not alter the user message")
+    }
+
+    func testDictionaryTermsAppendedAlongsideProfileSuffix() {
+        let (system, _) = RefinePrompt.messages(for: "test", profile: .code, dictionaryTerms: ["Docker"])
+        XCTAssertTrue(system.contains("editor de código"), "Code suffix must still be present")
+        XCTAssertTrue(
+            system.contains("Términos del usuario (respeta su escritura exacta): Docker"),
+            "Dictionary line must be present alongside the profile suffix")
+    }
 }
