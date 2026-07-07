@@ -108,7 +108,7 @@ Todos los sonidos se pueden desactivar en **Ajustes → General → Sonidos**.
 **Flujo de dictado (sesión continua):** la frase de activación abre una sesión de dictado que queda armada entre utterances — no hace falta repetirla para cada frase que quieras dictar.
 1. Di la frase de activación → **Glass** + "👂 Te escucho…" (HUD naranja con waveform animado)
 2. Dicta el texto (mientras el modo esté activo, el ícono del menú cambia a waveform)
-3. **Silencio de 0.5 segundos** → fin de la utterance, transcripción, refinado y pegado (mismo flujo que hotkey); **Pop** suena al insertar
+3. **Silencio de 1.5 segundos** → fin de la utterance, transcripción, refinado y pegado (mismo flujo que hotkey); **Pop** suena al insertar
 4. Texto insertado donde esté el cursor, y el HUD vuelve a "👂 Te escucho…" — la sesión sigue armada, lista para la siguiente utterance sin repetir la frase
 5. La sesión termina con **Esc**, apagando el toggle de manos libres, tras **45 segundos de silencio** sin nueva utterance (**Bottle** suena), o usando el **dictado por tecla (Fn)** — el hotkey toma control explícito del micrófono (privacidad primero: una acción manual manda sobre la sesión manos-libres) y termina la sesión; vuelve a decir la frase para reabrirla
 
@@ -201,7 +201,7 @@ Nota sobre timeouts: si dices la frase y no dictas nada después, el desarmado e
 - ✓ 4 sonidos de confirmación (Glass, Tink, Pop, Bottle) con toggle en Settings → General
 - ✓ Atajo global ⌥⌘K para alternar manos libres desde cualquier app (confirmación visual en HUD)
 - ✓ Indicador de estado en el ícono 🎤 (punto integrado cuando manos libres está activo — fin del emoji 👂)
-- ✓ Latencia de end-silence mejorada: 0.5s (antes 0.7s) para detección más rápida entre utterances
+- ✓ Detección más rápida de la frase de activación: corte de segmento en escucha 0.5s (antes 0.7s); el fin de utterance en sesión sigue en 1.5s
 - ✓ Settings rediseñado: sidebar con 5 secciones (General, Diccionario, Snippets, Historial, Acerca de); historial con refresco en vivo y fechas relativas
 
 **Fase 4 implementada (hardening quick-wins + empaquetado, en curso):**

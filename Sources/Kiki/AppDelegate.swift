@@ -116,8 +116,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func setUpStatusItem() {
-        // variableLength: el ícono lleva el logo y, con manos libres activo,
-        // el sufijo "👂" — el ancho cambia según el estado.
+        // El glifo es cuadrado y sin título, pero variableLength tolera
+        // futuros indicadores junto al ícono sin recortar.
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem.button?.appearsDisabled = true // hasta que cargue el modelo
 
