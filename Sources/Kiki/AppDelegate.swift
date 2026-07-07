@@ -32,6 +32,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var wakeListener: WakeListener!
     private var wakeEnabled = UserDefaults.standard.bool(forKey: AppDelegate.wakeEnabledKey)
     private var wakePausedByDictation = false
+    /// `true` cuando la pausa en curso (`dictationStateDidChange` con
+    /// `state != .idle`) fue originada por una captura de manos-libres
+    /// (`wakeListenerDidCapture`/`wakeListenerDidCaptureSameBreath`), en vez
+    /// de por el hotkey. Determina si al volver a `.idle` el listener se
+    /// reanuda con `resumeArmed()` (sesión continua, sin perder el arme) o
+    /// con `start()` (listening simple, como en una pausa por hotkey). Se
+    /// fija en `true` justo antes de lanzar `controller.process`/
+    /// `processTranscript` y se limpia apenas se consume en el resume.
+    private var resumeAsArmed = false
 
     // Stores + adapters de personalización (Fase 3, Task 3/4). AppDelegate es
     // el dueño fuerte de todo esto; los providers que se inyectan en
@@ -171,6 +180,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // pegada en pantalla aunque el dictado por hotkey siga funcionando.
             if controller.state == .idle { hud.show(state: .idle) }
             wakePausedByDictation = false
+            resumeAsArmed = false
             wakeEnabled = false
             UserDefaults.standard.set(false, forKey: Self.wakeEnabledKey)
         } else {
@@ -269,15 +279,26 @@ extension AppDelegate: DictationControllerDelegate {
         // falsos positivos de la frase de activación.
         if state != .idle && wakeEnabled {
             wakeListener.stop()
-            hud.showArmed(false)
+            // Si la pausa la originó una captura de manos-libres
+            // (`resumeAsArmed`), la pill "👂 Te escucho…" debe persistir en
+            // pantalla durante todo el procesamiento — no ocultarla aquí.
+            // Para una pausa por hotkey (no armado, o el usuario interrumpe
+            // manualmente), sí se oculta: evita que quede una pill "armada"
+            // pegada en pantalla si la sesión termina perdiéndose.
+            if !resumeAsArmed { hud.showArmed(false) }
             wakePausedByDictation = true
         } else if state == .idle && wakePausedByDictation && wakeEnabled {
             do {
-                try wakeListener.start()
+                if resumeAsArmed {
+                    try wakeListener.resumeArmed()
+                } else {
+                    try wakeListener.start()
+                }
             } catch {
                 wakeStartFailed(error, context: "al reanudar manos libres tras dictado")
             }
             wakePausedByDictation = false
+            resumeAsArmed = false
         }
     }
 
@@ -294,11 +315,20 @@ extension AppDelegate: WakeListenerDelegate {
     }
 
     func wakeListenerDidStartCapture() {
-        hud.showArmed(false)
+        // No hud.showArmed(false) aquí: la sesión sigue armada durante toda
+        // la captura y el procesamiento — solo se desarma vía
+        // wakeListenerDidDisarm (timeout/Esc) o el toggle. El pill de
+        // "Escuchando…" reemplaza visualmente al de "Te escucho…" mientras
+        // state == .recording (HUDView no consulta `armed` en ese caso), y
+        // el de "Te escucho…" vuelve solo al retornar a idle+armed.
         hud.show(state: .recording)
     }
 
     func wakeListenerDidCapture(samples: [Float]) {
+        // Marca la pausa que sigue (dictationStateDidChange) como originada
+        // por manos-libres: el resume debe usar resumeArmed(), no start(),
+        // para no perder la sesión continua ni pedir la frase de nuevo.
+        resumeAsArmed = true
         // No hud.show(state: .idle) aquí: controller.process() dispara
         // dictationStateDidChange(.processing) casi de inmediato vía su
         // delegate, así que un orderOut(.idle) intermedio solo producía un
@@ -307,11 +337,17 @@ extension AppDelegate: WakeListenerDelegate {
     }
 
     func wakeListenerDidCaptureSameBreath(text: String) {
+        // Mismo razonamiento que wakeListenerDidCapture: el dictado en el
+        // mismo aliento también abre/continúa una sesión continua — tras
+        // procesarlo, el listener debe reanudar armado, no volver a
+        // listening plano.
+        resumeAsArmed = true
         Task { await controller.processTranscript(text) }
     }
 
     func wakeListenerDidDisarm() {
         hud.showArmed(false)
+        resumeAsArmed = false
         // Ver comentario equivalente en toggleWake: cubre el caso en que el
         // desarmado llega mientras la captura ya estaba en curso (p.ej.
         // segmentDiscarded con el listener armado) y la pill de "Escuchando…"

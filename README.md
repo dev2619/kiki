@@ -85,16 +85,19 @@ Tras transcribir con Whisper, el texto se pasa a un modelo LLM local (Qwen2.5-3B
 - **"escúchame kiki"** — inicia grabación de micrófono en modo manos libres
 - **"listen to me kiki"** — variante en inglés (ambas frases detectadas por modelo VAD+Whisper híbrido)
 
-**Flujo de dictado:**
+**Flujo de dictado (sesión continua):** la frase de activación abre una sesión de dictado que queda armada entre utterances — no hace falta repetirla para cada frase que quieras dictar.
 1. Di la frase de activación → **chime** + "👂 Te escucho…" (HUD naranja con waveform animado)
 2. Dicta el texto (mientras el modo esté activo, el ícono del menú cambia a waveform)
-3. **Silencio de 1.5 segundos** → fin de grabación, transcripción y refinado (mismo flujo que hotkey)
-4. Texto insertado donde esté el cursor
+3. **Silencio de 1.5 segundos** → fin de la utterance, transcripción, refinado y pegado (mismo flujo que hotkey)
+4. Texto insertado donde esté el cursor, y el HUD vuelve a "👂 Te escucho…" — la sesión sigue armada, lista para la siguiente utterance sin repetir la frase
+5. La sesión termina con **Esc**, apagando el toggle de manos libres, o tras **45 segundos de silencio** sin nueva utterance
+
+Nota sobre timeouts: si dices la frase y no dictas nada después, el desarmado es más rápido (**8 segundos**) que el de silencio entre utterances dentro de una sesión ya en marcha (**45 segundos**) — evita quedarte "armado" indefinidamente por una frase suelta, sin cortar de golpe una sesión de dictado real mientras piensas la siguiente frase.
 
 **Dictado en el mismo aliento:** Puedes decir la frase y el texto en una sola oración:
-- _"Escúchame kiki, escribe: el protocolo TCP establece una conexión de tres vías"_ → la frase se descarta, solo se transcribe y refina "el protocolo TCP…"
+- _"Escúchame kiki, escribe: el protocolo TCP establece una conexión de tres vías"_ → la frase se descarta, solo se transcribe y refina "el protocolo TCP…". Esto también abre la sesión continua: tras pegar el texto, el HUD vuelve a "👂 Te escucho…" para la siguiente utterance.
 
-**Cancelación:** Presiona **Esc** en cualquier momento durante la grabación (ambos modos: hotkey y manos libres) para descartar la grabación.
+**Cancelación:** Presiona **Esc** en cualquier momento durante la grabación (ambos modos: hotkey y manos libres) para descartar la grabación. En manos libres, Esc también **termina la sesión completa** (vuelve a esperar la frase de activación desde cero).
 
 **Privacidad:**
 - Mientras el modo manos libres esté activo, el indicador de micrófono en la barra de estado muestra un punto **naranja permanente** (aviso de que el micrófono está monitoreando).
@@ -107,7 +110,7 @@ Tras transcribir con Whisper, el texto se pasa a un modelo LLM local (Qwen2.5-3B
 - **openWakeWord (optimización futura):** modelo dedicado ~1 MB para detección de frase más eficiente — pendiente en backlog.
 
 **Limitaciones conocidas:**
-- **Ambientes muy ruidosos:** pueden disparar segmentos de grabación falsos si el umbral de RMS (energy threshold) se cruza. En v1 usamos un umbral fijo; umbral adaptativo está en backlog.
+- **Ambientes muy ruidosos:** pueden disparar segmentos de grabación falsos si el umbral de RMS (energy threshold, default `0.008`) se cruza. En v1 usamos un umbral fijo; umbral adaptativo está en backlog. El log incluye diagnóstico de calibración (`kiki wake: pico RMS últimos 10s: ...`) durante las primeras ventanas de 10s tras cada arranque de manos libres, útil para ajustar el umbral al micrófono real del usuario.
 - **"Listo" como palabra de cierre:** la spec lo menciona (§3) como forma alternativa de terminar dictado; **no implementado en v1** — en backlog junto con otras mejoras de UX.
 
 ## Personalización (Fase 3)
@@ -147,10 +150,12 @@ Tras transcribir con Whisper, el texto se pasa a un modelo LLM local (Qwen2.5-3B
 - ✓ Wake word (VAD + Whisper híbrido: detección por frase "escúchame kiki" / "listen to me kiki")
 - ✓ Toggle en menú + UserDefaults (default OFF)
 - ✓ Chime + HUD "👂 Te escucho…"
-- ✓ Dictado en el mismo aliento (frase se descarta)
-- ✓ Cancelación con Esc en ambos modos (hotkey y manos libres)
+- ✓ Sesión de dictado continua: la frase arma una sesión que sigue armada entre utterances (8s de timeout inicial sin dictado, 45s de silencio entre utterances dentro de la sesión) hasta Esc, toggle OFF o el timeout
+- ✓ Dictado en el mismo aliento (frase se descarta), también abre sesión continua
+- ✓ Cancelación con Esc en ambos modos (hotkey y manos libres); en manos libres termina la sesión completa
 - ✓ Indicador naranja de micrófono activo
 - ✓ Audio solo en RAM, segmentos sin frase no se loggean
+- ✓ Diagnóstico de calibración de RMS en el log (primeras ventanas de 10s tras cada arranque)
 
 **Pendiente (optimizaciones 2B):**
 - openWakeWord (modelo dedicado ~1 MB) — alternativa más eficiente a VAD+Whisper

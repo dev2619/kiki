@@ -28,7 +28,15 @@ final class HUDController {
         model.state = state
         switch state {
         case .idle:
-            panel.orderOut(nil)
+            // Sesión continua de manos-libres: si sigue armada (pill "👂 Te
+            // escucho…" entre utterances), NO ocultar el panel al volver a
+            // idle — solo se oculta cuando de verdad no hay nada que mostrar.
+            if model.armed {
+                positionAtBottomCenter()
+                panel.orderFrontRegardless()
+            } else {
+                panel.orderOut(nil)
+            }
         case .recording, .processing:
             positionAtBottomCenter()
             panel.orderFrontRegardless()
