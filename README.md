@@ -117,14 +117,14 @@ Tras transcribir con Whisper, el texto se pasa a un modelo LLM local (Qwen2.5-3B
 **Diccionario personal:**
 - Añade términos propios (nombres, palabras técnicas, neologismos) que mejoran la precisión de Whisper.
 - Se inyecta en el prompt inicial de Whisper (encabezado language-aware, ~120 tokens de cap) **y** en el prompt del sistema del LLM.
-- Cada entrada: `palabra exacta → forma de escritura preferida` (ej. "kiki" → "kiki", "tcp" → "TCP", "fulano" → "Fulano Pérez").
+- Lista de términos cuya escritura exacta se respeta (ej. añade `Kubernetes`, `TCP`, `Fulano Pérez` y kiki los reconocerá y escribirá tal cual).
 - Máx. ~40 entradas por idioma sin exceder el cap de tokens.
 
 **Snippets:**
 - Macros: di exactamente el trigger → se inserta la plantilla sin pasar por el LLM.
 - Matching determinístico (normalización completa del trigger: lowercase, sin acentos, espacios condensados).
 - Cero latencia: la expansión es instantánea, no requiere IA.
-- Ej: trigger "firma_corta" → plantilla "Saludos, Ana" (sin refinado, listo en ms).
+- Ej: trigger "firma corta" (tal como lo dirías en voz alta) → plantilla "Saludos, Ana" (sin refinado, listo en ms).
 
 **Historial:**
 - Últimos 200 dictados grabados: cada fila muestra `[crudo: texto de Whisper] [final: texto después de refinado]`.
@@ -133,7 +133,7 @@ Tras transcribir con Whisper, el texto se pasa a un modelo LLM local (Qwen2.5-3B
 - 100% local en JSON — nunca sale del Mac.
 
 **Persistencia:**
-- Todos los datos (diccionario, snippets, historial, toggles de configuración) se guardan en JSON atómico en `~/Library/Application Support/kiki/` (v1 basada en JSON; migración a SQLite abierta para v2).
+- Diccionario, snippets e historial se guardan en JSON atómico en `~/Library/Application Support/kiki/` (v1 basada en JSON; migración a SQLite abierta para v2).
 
 ## Notas de alcance (Fase 2A-2B-3)
 
