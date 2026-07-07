@@ -160,8 +160,20 @@ public final class SpeechSegmenter {
     /// segmenter into treating literally everything as noise forever.
     private static let effectiveThresholdMax: Float = 0.06
 
-    private var noiseFloor: Float
+    private var noiseFloorEstimate: Float
     private var noiseFloorSeeded = false
+
+    /// The learned ambient noise floor, or `nil` when there is nothing
+    /// meaningful to carry over (adaptive mode off, or the floor hasn't
+    /// been seeded by any chunk / external seed yet). Exposed so a caller
+    /// that REPLACES its segmenter instance on regime transitions (as
+    /// `WakeListener` does on arm/disarm/cancel/start) can thread the
+    /// learned floor into the replacement via `init(seedNoiseFloor:)` —
+    /// otherwise the floor dies with each instance and a loud room
+    /// re-deadlocks the fresh segmenter until it re-converges from scratch.
+    public var noiseFloor: Float? {
+        (config.adaptiveThreshold && noiseFloorSeeded) ? noiseFloorEstimate : nil
+    }
 
     /// Effective speech/silence classification cutoff. Equal to
     /// `config.speechRMSThreshold` when `config.adaptiveThreshold` is
@@ -172,11 +184,26 @@ public final class SpeechSegmenter {
     public private(set) var effectiveThreshold: Float
 
     // MARK: - Initialization
-    public init(config: SegmenterConfig, sampleRate: Double = 16_000) {
+    /// - Parameters:
+    ///   - seedNoiseFloor: Optional noise floor learned by a PREVIOUS
+    ///     segmenter instance (see `noiseFloor`). When provided and
+    ///     `config.adaptiveThreshold` is on, the floor starts at this value
+    ///     already seeded — the next silence chunk EMAs from it instead of
+    ///     replacing it — and `effectiveThreshold` is derived from it
+    ///     immediately (clamped as usual). Ignored when adaptive mode is
+    ///     off.
+    public init(config: SegmenterConfig, sampleRate: Double = 16_000, seedNoiseFloor: Float? = nil) {
         self.config = config
         self.sampleRate = sampleRate
-        self.effectiveThreshold = config.speechRMSThreshold
-        self.noiseFloor = config.speechRMSThreshold / Self.noiseFloorMultiplier
+        if config.adaptiveThreshold, let seedNoiseFloor {
+            self.noiseFloorEstimate = seedNoiseFloor
+            self.noiseFloorSeeded = true
+            let raw = seedNoiseFloor * Self.noiseFloorMultiplier
+            self.effectiveThreshold = min(max(raw, Self.effectiveThresholdMin), Self.effectiveThresholdMax)
+        } else {
+            self.effectiveThreshold = config.speechRMSThreshold
+            self.noiseFloorEstimate = config.speechRMSThreshold / Self.noiseFloorMultiplier
+        }
     }
 
     // MARK: - Main processing
@@ -226,7 +253,7 @@ public final class SpeechSegmenter {
         trailingModeSilenceSamples = []
         accumulatedSampleCount = 0
         accumulatedSilenceSamples = 0
-        noiseFloor = config.speechRMSThreshold / Self.noiseFloorMultiplier
+        noiseFloorEstimate = config.speechRMSThreshold / Self.noiseFloorMultiplier
         noiseFloorSeeded = false
         effectiveThreshold = config.speechRMSThreshold
     }
@@ -245,7 +272,7 @@ public final class SpeechSegmenter {
             // threshold/multiplier instead so effectiveThreshold has a
             // sane, immediately-consistent starting point
             // (seed * multiplier == speechRMSThreshold).
-            noiseFloor = isSpeech ? (config.speechRMSThreshold / Self.noiseFloorMultiplier) : rms
+            noiseFloorEstimate = isSpeech ? (config.speechRMSThreshold / Self.noiseFloorMultiplier) : rms
             noiseFloorSeeded = true
             recomputeEffectiveThreshold()
             return
@@ -259,21 +286,21 @@ public final class SpeechSegmenter {
 
         case .silence:
             guard !isSpeech else { return }
-            noiseFloor = noiseFloor * (1 - Self.noiseFloorAlpha) + rms * Self.noiseFloorAlpha
+            noiseFloorEstimate = noiseFloorEstimate * (1 - Self.noiseFloorAlpha) + rms * Self.noiseFloorAlpha
 
         case .awaitingSilence:
             // See the class-level doc comment above `noiseFloorAlphaUnstick`:
             // this branch is what guarantees convergence in a loud room where
             // every chunk would otherwise read as speech forever.
             let alpha = isSpeech ? Self.noiseFloorAlphaUnstick : Self.noiseFloorAlpha
-            noiseFloor = noiseFloor * (1 - alpha) + rms * alpha
+            noiseFloorEstimate = noiseFloorEstimate * (1 - alpha) + rms * alpha
         }
 
         recomputeEffectiveThreshold()
     }
 
     private func recomputeEffectiveThreshold() {
-        let raw = noiseFloor * Self.noiseFloorMultiplier
+        let raw = noiseFloorEstimate * Self.noiseFloorMultiplier
         effectiveThreshold = min(max(raw, Self.effectiveThresholdMin), Self.effectiveThresholdMax)
     }
 

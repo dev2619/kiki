@@ -138,6 +138,21 @@ public final class WakeListener: @unchecked Sendable {
     private let armedConfig: SegmenterConfig
     private var segmenter: SpeechSegmenter
 
+    /// Último piso de ruido aprendido conocido, persistido a través de las
+    /// recreaciones de `segmenter` E incluso a través de `stop()`+`start()`
+    /// (el engine se apaga y reenciende entre cada captura de la sesión
+    /// continua — ver `AppDelegate.resumeAsArmed` — y el ambiente del cuarto
+    /// no cambió en ese medio segundo). Sin esto, el piso aprendido muere
+    /// con cada instancia: en el escenario de campo del cuarto ruidoso, el
+    /// segmenter de `.listening` converge, la frase por fin matchea, y
+    /// `arm()` entregaría un segmenter armado (¡maxSegmentDuration 30s!)
+    /// re-bloqueado desde cero — los primeros ~30s de dictado REAL se
+    /// descartarían como "máximo" mientras re-converge. Se actualiza en
+    /// `makeSegmenter` (recreaciones en vivo) y en `stop()` (antes del
+    /// `reset()` que borra el piso de la instancia). Confinado a `queue`
+    /// como el resto del estado mutable.
+    private var lastKnownNoiseFloor: Float?
+
     /// Solo una transcripción en vuelo a la vez; un segmento que llega
     /// mientras hay una pendiente ya NO se descarta (bug de campo: la frase
     /// de activación completa podía llegar justo durante el check en vuelo
@@ -294,7 +309,7 @@ public final class WakeListener: @unchecked Sendable {
             }
             resetSessionCounters()
             hasCapturedInSession = false
-            segmenter = SpeechSegmenter(config: listeningConfig)
+            segmenter = makeSegmenter(config: listeningConfig)
             try installTapAndStartEngine()
             _state = .listening
             KikiLog.log("kiki wake: listening iniciado")
@@ -321,7 +336,7 @@ public final class WakeListener: @unchecked Sendable {
             // captura en esta sesión, así que el próximo timeout es el de
             // sesión continua (45s), no el inicial (8s).
             hasCapturedInSession = true
-            segmenter = SpeechSegmenter(config: armedConfig)
+            segmenter = makeSegmenter(config: armedConfig)
             try installTapAndStartEngine()
             _state = .armed
             KikiLog.log("kiki wake: reanudado armado (sesión continua)")
@@ -343,6 +358,21 @@ public final class WakeListener: @unchecked Sendable {
         calibrationPeakRMS = 0
         calibrationWindowSampleCount = 0
         calibrationWindowsLogged = 0
+    }
+
+    /// Único constructor de segmenters de reemplazo: preserva el piso de
+    /// ruido aprendido a través de la recreación (ver `lastKnownNoiseFloor`
+    /// para el bug de interacción que esto cierra). Captura el piso del
+    /// segmenter saliente si tiene uno (las recreaciones en vivo — `arm()`,
+    /// `cancelCapture()`, `fireDisarmTimeout()` — llegan aquí con el
+    /// segmenter aún cargado); si no (tras `stop()`, que ya hizo `reset()`
+    /// sobre la instancia), usa el último piso capturado en `stop()`.
+    private func makeSegmenter(config: SegmenterConfig) -> SpeechSegmenter {
+        dispatchPrecondition(condition: .onQueue(queue))
+        if let learned = segmenter.noiseFloor {
+            lastKnownNoiseFloor = learned
+        }
+        return SpeechSegmenter(config: config, seedNoiseFloor: lastKnownNoiseFloor)
     }
 
     /// Instala el tap de audio y arranca el engine; usado por `start()` y
@@ -383,6 +413,12 @@ public final class WakeListener: @unchecked Sendable {
             // encolada) pero que todavía no haya corrido.
             notificationEpoch += 1
             flushPartialCalibrationWindow()
+            // Capturar el piso aprendido ANTES del reset() que lo borra de
+            // la instancia: el próximo start()/resumeArmed() lo re-siembra
+            // vía makeSegmenter (ver lastKnownNoiseFloor).
+            if let learned = segmenter.noiseFloor {
+                lastKnownNoiseFloor = learned
+            }
             segmenter.reset()
             _state = .stopped
             KikiLog.log("kiki wake: detenido")
@@ -415,7 +451,7 @@ public final class WakeListener: @unchecked Sendable {
             // el pre-roll que tenía el anterior, así que hay una ventana de
             // ~0.3s donde el primer audio entrante puede perderse antes de
             // que el buffer circular interno se rellene de nuevo.
-            segmenter = SpeechSegmenter(config: listeningConfig)
+            segmenter = makeSegmenter(config: listeningConfig)
             _state = .listening
             suppressUntilSampleCount = nil
             hasCapturedInSession = false
@@ -633,7 +669,13 @@ public final class WakeListener: @unchecked Sendable {
         // chequeo ya no aplica: el régimen armado usa `armedConfig`/otro
         // segmenter y ese audio no es dictado dirigido a kiki.
         pendingSegment = nil
-        segmenter = SpeechSegmenter(config: armedConfig)
+        // makeSegmenter (no SpeechSegmenter directo): el piso de ruido que
+        // el segmenter de `.listening` acaba de aprender es EXACTAMENTE el
+        // que el segmenter armado necesita — es el mismo cuarto un instante
+        // después. Sin el carry-over, un cuarto ruidoso re-bloquearía el
+        // segmenter armado (maxSegmentDuration 30s) y los primeros ~30s del
+        // dictado real se descartarían como "máximo" mientras re-converge.
+        segmenter = makeSegmenter(config: armedConfig)
         // Ver doc de postArmSuppression: el chime que dispara wakeListenerDidArm
         // (más abajo) no debe colarse en el segmenter recién armado.
         suppressUntilSampleCount = accumulatedSampleCount + Int(Self.postArmSuppression * Self.sampleRate)
@@ -675,7 +717,7 @@ public final class WakeListener: @unchecked Sendable {
         // speechStarted); si la generación ya avanzó, este disparo es stale.
         guard generation == disarmGeneration, _state == .armed else { return }
         disarmTask = nil
-        segmenter = SpeechSegmenter(config: listeningConfig)
+        segmenter = makeSegmenter(config: listeningConfig)
         _state = .listening
         suppressUntilSampleCount = nil
         hasCapturedInSession = false

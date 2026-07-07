@@ -158,9 +158,14 @@ final class AdaptiveNoiseFloorTests: XCTestCase {
     // = 0.01, noiseFloorMultiplier = 3.5, seed = 0.008 / 3.5 = 0.0022857.
     // Target: noiseFloor > 0.03 / 3.5 = 0.0085714 (so effectiveThreshold > 0.03).
     // Solving 0.03 - (0.03 - 0.0022857) * 0.99^n > 0.0085714 gives n ~= 25.6,
-    // i.e. ~26 awaitingSilence chunks (~2.6s). With maxSegmentDuration = 1.0s
-    // to reach awaitingSilence quickly, total convergence lands at roughly
-    // 3.6s from t0 - comfortably inside the 6s bound this test asserts.
+    // i.e. 26 awaitingSilence chunks (2.6s, confirmed by direct simulation) —
+    // the bound asserted below is 3.5s measured FROM the "máximo" discard
+    // that enters `.awaitingSilence` (26 chunks + margin for constant drift).
+    //
+    // Beyond the threshold crossing, this test also proves the state machine
+    // actually RECOVERS: post-convergence ambient chunks classify as silence,
+    // `.awaitingSilence` drains through `endSilence` back to `.silence`, and
+    // a genuinely louder utterance then produces `.speechStarted` again.
     func testLoudRoomConvergesToAboveAmbientWithinBound() {
         let config = SegmenterConfig(
             speechRMSThreshold: 0.008,
@@ -172,30 +177,118 @@ final class AdaptiveNoiseFloorTests: XCTestCase {
         let segmenter = SpeechSegmenter(config: config)
 
         let loudRMS: Float = 0.03
-        let convergenceBoundSeconds: Double = 6.0
-        let maxChunks = Int(convergenceBoundSeconds / 0.1)
+        let postDiscardConvergenceBoundSeconds = 3.5
+        let maxChunks = 60 // 6s of ambient input, ample room past the bound
 
+        var maximoDiscardChunk: Int?
         var convergedAtChunk: Int?
-        var sawMaximoDiscard = false
 
         for i in 0..<maxChunks {
             let event = segmenter.process(chunk: chunk(), rms: loudRMS)
-            if case .segmentDiscarded(let reason) = event, reason == "máximo" {
-                sawMaximoDiscard = true
+            if case .segmentDiscarded(let reason) = event, reason == "máximo", maximoDiscardChunk == nil {
+                maximoDiscardChunk = i
             }
             if convergedAtChunk == nil && segmenter.effectiveThreshold > loudRMS {
                 convergedAtChunk = i
             }
         }
 
-        XCTAssertTrue(sawMaximoDiscard, "Sustained loud rms above the seeded threshold must still hit the max-duration discard at least once")
-        guard let convergedAtChunk else {
-            XCTFail("effectiveThreshold never exceeded the loud-room rms (0.03) within \(convergenceBoundSeconds)s - the segmenter would stay stuck forever")
+        guard let maximoDiscardChunk else {
+            XCTFail("Sustained loud rms above the seeded threshold must hit the max-duration discard")
             return
         }
-        let convergedAtSeconds = Double(convergedAtChunk) * 0.1
-        XCTAssertLessThanOrEqual(convergedAtSeconds, convergenceBoundSeconds, "Loud-room convergence must complete within \(convergenceBoundSeconds)s")
-        XCTAssertGreaterThan(segmenter.effectiveThreshold, loudRMS, "Final effective threshold must exceed the loud room's ambient rms so it is classified as silence again")
+        guard let convergedAtChunk else {
+            XCTFail("effectiveThreshold never exceeded the loud-room rms (0.03) - the segmenter would stay stuck forever")
+            return
+        }
+        let postDiscardSeconds = Double(convergedAtChunk - maximoDiscardChunk) * 0.1
+        XCTAssertLessThanOrEqual(postDiscardSeconds, postDiscardConvergenceBoundSeconds, "Convergence must complete within \(postDiscardConvergenceBoundSeconds)s of entering awaitingSilence (documented n=26 chunks / 2.6s + margin)")
+        XCTAssertGreaterThan(segmenter.effectiveThreshold, loudRMS, "Final effective threshold must exceed the loud room's ambient rms")
+
+        // The state machine must have RETURNED TO SILENCE classification, not
+        // merely crossed the threshold: further ambient chunks produce no
+        // events at all (no speechStarted, no further "máximo" — i.e. the
+        // segmenter drained awaitingSilence and is idling in .silence)...
+        for _ in 0..<10 {
+            let event = segmenter.process(chunk: chunk(), rms: loudRMS)
+            XCTAssertEqual(event, .none, "Post-convergence ambient chunks must classify as silence (no events)")
+        }
+        // ...and a genuinely louder utterance is detected again. 0.1 clears
+        // even the max threshold clamp (0.06), which the floor approaches as
+        // it keeps tracking the 0.03 ambient at the normal alpha.
+        let speechEvent = segmenter.process(chunk: chunk(), rms: 0.1)
+        XCTAssertEqual(speechEvent, .speechStarted, "After recovery, real speech above the adapted threshold must trigger speechStarted from .silence")
+    }
+
+    // MARK: - Noise-floor carry-over (seedNoiseFloor)
+    //
+    // Critical interaction found in review: WakeListener recreates its
+    // SpeechSegmenter at every regime transition (arm(), start(),
+    // resumeArmed(), cancelCapture(), disarm timeout). If each fresh
+    // instance reseeds at threshold/3.5, the floor learned by the previous
+    // instance dies with it: in the loud-room field scenario the LISTENING
+    // segmenter converges, the wake phrase finally matches, and then arm()
+    // hands the user an ARMED segmenter (maxSegmentDuration 30s!) that is
+    // deadlocked all over again — the first ~30s of actual dictation would
+    // be discarded as "máximo" while it re-converges. `seedNoiseFloor` lets
+    // the caller thread the learned floor into the replacement instance.
+
+    func testSeedNoiseFloorCarriesConvergedFloorToNewSegmenter() {
+        let config = SegmenterConfig(
+            speechRMSThreshold: 0.008,
+            endSilence: 0.7,
+            minSpeechDuration: 0.4,
+            maxSegmentDuration: 1.0,
+            adaptiveThreshold: true
+        )
+        let segmenterA = SpeechSegmenter(config: config)
+
+        // Converge A in the loud room (same scenario as the test above).
+        let loudRMS: Float = 0.03
+        for _ in 0..<60 {
+            _ = segmenterA.process(chunk: chunk(), rms: loudRMS)
+        }
+        XCTAssertGreaterThan(segmenterA.effectiveThreshold, loudRMS, "Sanity: A must have converged")
+        guard let learnedFloor = segmenterA.noiseFloor else {
+            XCTFail("A converged, so its learned noiseFloor must be exposed (non-nil)")
+            return
+        }
+
+        // B represents the post-transition segmenter (e.g. the armed config
+        // after arm()). Seeded with A's floor, it must classify the room's
+        // ambient level as silence from the VERY FIRST chunk — no
+        // re-convergence period during which real dictation would be lost.
+        let armedLikeConfig = SegmenterConfig(
+            speechRMSThreshold: 0.008,
+            endSilence: 1.5,
+            maxSegmentDuration: 30,
+            adaptiveThreshold: true
+        )
+        let segmenterB = SpeechSegmenter(config: armedLikeConfig, seedNoiseFloor: learnedFloor)
+
+        XCTAssertGreaterThan(segmenterB.effectiveThreshold, loudRMS, "Seeded threshold must already exceed the ambient level before any chunk")
+        let firstChunkEvent = segmenterB.process(chunk: chunk(), rms: loudRMS)
+        XCTAssertEqual(firstChunkEvent, .none, "Ambient 0.03 must classify as silence from chunk 1 — no speechStarted, no re-convergence")
+    }
+
+    func testSeedNoiseFloorIgnoredWhenAdaptiveOff() {
+        let config = SegmenterConfig(speechRMSThreshold: 0.008, adaptiveThreshold: false)
+        let segmenter = SpeechSegmenter(config: config, seedNoiseFloor: 0.02)
+        XCTAssertEqual(segmenter.effectiveThreshold, 0.008, "With adaptive off the effective threshold is always the configured one; the seed must be ignored")
+        XCTAssertNil(segmenter.noiseFloor, "No learned floor to expose when adaptive is off")
+    }
+
+    func testNoiseFloorExposureLifecycle() {
+        let config = SegmenterConfig(speechRMSThreshold: 0.008, adaptiveThreshold: true)
+        let segmenter = SpeechSegmenter(config: config)
+
+        XCTAssertNil(segmenter.noiseFloor, "Before any chunk there is nothing learned to carry over")
+
+        _ = segmenter.process(chunk: chunk(), rms: 0.001)
+        XCTAssertEqual(segmenter.noiseFloor ?? -1, 0.001, accuracy: 0.0001, "First silence chunk seeds the floor at its RMS and exposes it")
+
+        segmenter.reset()
+        XCTAssertNil(segmenter.noiseFloor, "reset() discards the learned floor along with the rest of the adaptive state")
     }
 
     // MARK: - Reset restores adaptive state
