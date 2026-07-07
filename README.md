@@ -2,7 +2,7 @@
 
 Dictado por voz con IA, **100% local**, para macOS. Mantén **Fn**, habla, suelta — el texto aparece donde esté tu cursor, en cualquier app. Tu voz nunca sale de tu Mac.
 
-> Fase actual: **2B — manos libres** (hotkey + Whisper local + LLM Qwen2.5-3B + paste + wake phrase "escúchame kiki").
+> Fase actual: **3 — personalización** (Ajustes desde el menú: diccionario personal, snippets, historial local, persistencia JSON en Application Support).
 > Spec completo: [`docs/superpowers/specs/2026-07-06-kiki-design.md`](docs/superpowers/specs/2026-07-06-kiki-design.md)
 
 ## Requisitos
@@ -53,7 +53,7 @@ TEST_RUNNER_KIKI_LLM_TEST=1 xcodebuild test -scheme kiki -destination 'platform=
 
 ## Arquitectura
 
-Módulos SPM: `KikiCore` (máquina de estados) · `KikiAudio` (mic → 16 kHz mono) · `KikiSTT` (WhisperKit) · `KikiRefine` (LLM Qwen + tone profiles) · `KikiContext` (app detection + tone mapping) · `KikiInsert` (paste preservando clipboard) · `KikiWake` (wake word detection + VAD) · `Kiki` (menu bar app, hotkey, HUD).
+Módulos SPM: `KikiCore` (máquina de estados) · `KikiAudio` (mic → 16 kHz mono) · `KikiSTT` (WhisperKit) · `KikiRefine` (LLM Qwen + tone profiles) · `KikiContext` (app detection + tone mapping) · `KikiInsert` (paste preservando clipboard) · `KikiWake` (wake word detection + VAD) · `KikiStore` (persistencia JSON: diccionario, snippets, historial) · `Kiki` (menu bar app, hotkey, HUD).
 
 ## Refinado con IA (Fase 2A)
 
@@ -110,7 +110,32 @@ Tras transcribir con Whisper, el texto se pasa a un modelo LLM local (Qwen2.5-3B
 - **Ambientes muy ruidosos:** pueden disparar segmentos de grabación falsos si el umbral de RMS (energy threshold) se cruza. En v1 usamos un umbral fijo; umbral adaptativo está en backlog.
 - **"Listo" como palabra de cierre:** la spec lo menciona (§3) como forma alternativa de terminar dictado; **no implementado en v1** — en backlog junto con otras mejoras de UX.
 
-## Notas de alcance (Fase 2A-2B)
+## Personalización (Fase 3)
+
+**Ajustes desde el menú:** Menú 🎤 → "Ajustes…" (Cmd+,) abre la ventana de configuración con 4 pestañas.
+
+**Diccionario personal:**
+- Añade términos propios (nombres, palabras técnicas, neologismos) que mejoran la precisión de Whisper.
+- Se inyecta en el prompt inicial de Whisper (encabezado language-aware, ~120 tokens de cap) **y** en el prompt del sistema del LLM.
+- Cada entrada: `palabra exacta → forma de escritura preferida` (ej. "kiki" → "kiki", "tcp" → "TCP", "fulano" → "Fulano Pérez").
+- Máx. ~40 entradas por idioma sin exceder el cap de tokens.
+
+**Snippets:**
+- Macros: di exactamente el trigger → se inserta la plantilla sin pasar por el LLM.
+- Matching determinístico (normalización completa del trigger: lowercase, sin acentos, espacios condensados).
+- Cero latencia: la expansión es instantánea, no requiere IA.
+- Ej: trigger "firma_corta" → plantilla "Saludos, Ana" (sin refinado, listo en ms).
+
+**Historial:**
+- Últimos 200 dictados grabados: cada fila muestra `[crudo: texto de Whisper] [final: texto después de refinado]`.
+- Botón copiar por fila (copia el campo final).
+- Botón "Borrar todo" (limpia el historial; no se puede deshacer).
+- 100% local en JSON — nunca sale del Mac.
+
+**Persistencia:**
+- Todos los datos (diccionario, snippets, historial, toggles de configuración) se guardan en JSON atómico en `~/Library/Application Support/kiki/` (v1 basada en JSON; migración a SQLite abierta para v2).
+
+## Notas de alcance (Fase 2A-2B-3)
 
 **Fase 2A implementada:**
 - ✓ Refinado LLM local (Qwen2.5-3B-Instruct-4bit, ~1.8 GB)
@@ -133,13 +158,29 @@ Tras transcribir con Whisper, el texto se pasa a un modelo LLM local (Qwen2.5-3B
 - "Listo" como palabra de cierre (spec §3 lo menciona; no va en v1)
 - Seam de audio testeable para WakeListener (mejorar cobertura de tests)
 
-**Pendiente (Fase 3):**
-- Diccionario custom de palabras (spec §9)
-- Snippets y macros (spec §9)
-- Settings UI para perfiles de tono y desactivación de refinado
+**Fase 3 implementada (personalización):**
+- ✓ Diccionario custom de palabras (inyección en Whisper + prompt del LLM)
+- ✓ Snippets y macros (matching determinístico, expansión sin latencia)
+- ✓ Historial local (cap 200, copyable, clearable, JSON persistente)
+- ✓ Settings UI con 4 pestañas (Diccionario, Snippets, Historial, General)
+- ✓ Persistencia JSON atómico en Application Support
+
+**Pendiente (Fase 4 — empaquetado y distribución):**
+- Onboarding guiado de permisos (micrófono, Accesibilidad)
+- Empaquetado .dmg con instalador
+- Notarización y hardened runtime (requiere Apple Developer Program)
+- Auto-update mechanism
+
+**Backlog acumulado (sin planificar aún):**
+- openWakeWord (optimización de eficiencia de wake word)
+- Umbral de energía adaptativo
+- "Listo" como palabra de cierre
+- Auto-aprendizaje del diccionario (expansión automática de palabras frecuentes)
+- Seam audio testeable para WakeListener
 
 **Notas técnicas:**
 - **Decisión 2026-07-06 (Whisper):** la variante full-precision (3 GB) disparaba compilaciones ANE de 10-30 min en la primera inferencia (ANECompilerService al 95% CPU, app bloqueada en "Procesando…") y se re-pagaban tras cada rebuild por la firma ad-hoc. Con la cuantizada + prewarm, la compilación ocurre en la carga y la inferencia queda en segundos.
 - **Decisión 2026-07-06 (LLM + Metal):** Qwen2.5-3B con MLX requiere `xcodebuild` para compilar los shaders Metal en la carga; no es posible con CLT solo. La carga es ~10–20s en primer arranque (compilación + prewarm), las inferencias siguientes ~2-3s (medido: 2.2s de generación real con el modelo ya en caché, ver `.superpowers/sdd/task-2a4-report.md`).
 - **Decisión 2026-07-06 (latencia end-to-end vs spec Fase 1):** la latencia total de dictado con refinado (~3-4s: STT + generación LLM) excede el objetivo <2s del spec Fase 1. Decisión registrada: aceptado en Fase 2A (el refinado con IA es una mejora nueva, no parte del baseline original), tuning en Fase 3 (candidatos: modelo 1.5B, prompt más corto, streaming).
 - **Decisión 2026-07-06 (wake v1 híbrida):** VAD por energía + transcripción Whisper en segmentos detecta la frase con suficiente confiabilidad para v1. openWakeWord (modelo especializado) es más eficiente pero requiere investigación — en backlog como optimización.
+- **Decisión 2026-07-06 (KikiStore: JSON vs SQLite):** v1 usa persistencia JSON atómica en `~/Library/Application Support/kiki/` (diccionario, snippets, historial, config). JSON es suficiente para volúmenes iniciales (~40 entradas de diccionario, ~100 snippets, 200 items de historial); migración a SQLite está abierta para v2 si la complejidad de consultas o el volumen crece.
