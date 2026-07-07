@@ -31,6 +31,15 @@ public protocol TextInserting: AnyObject {
 public protocol DictationControllerDelegate: AnyObject {
     func dictationStateDidChange(_ state: DictationState)
     func dictationDidFail(_ error: DictationError)
+    /// Se dispara justo después de insertar texto con éxito (path de snippet
+    /// o de refinado/crudo), en ambos modos (hotkey y manos-libres). Default
+    /// vacío vía extensión para no romper conformers/tests existentes que no
+    /// lo necesitan.
+    func dictationDidInsert()
+}
+
+extension DictationControllerDelegate {
+    public func dictationDidInsert() {}
 }
 
 public enum AppProfile: String, Equatable, CaseIterable {

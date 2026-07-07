@@ -27,7 +27,7 @@ bundle: build
 	mkdir -p $(APP)/Contents/MacOS $(APP)/Contents/Resources
 	cp App/Info.plist $(APP)/Contents/Info.plist
 	cp App/AppIcon.icns $(APP)/Contents/Resources/AppIcon.icns
-	cp App/MenuBarIcon.png App/MenuBarIcon@2x.png $(APP)/Contents/Resources/
+	cp App/MenuBarIcon.png App/MenuBarIcon@2x.png App/MenuBarIconActive.png App/MenuBarIconActive@2x.png $(APP)/Contents/Resources/
 	cp $(BIN) $(APP)/Contents/MacOS/Kiki
 	# Bundles de recursos de dependencias SPM — incluye
 	# mlx-swift_Cmlx.bundle/Contents/Resources/default.metallib (shaders Metal

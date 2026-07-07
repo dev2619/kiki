@@ -120,6 +120,7 @@ public final class DictationController {
                 if let template = snippets?.expand(trimmed) {
                     try inserter.insert(template)
                     KikiLog.log("kiki core: snippet expandido")
+                    delegate?.dictationDidInsert()
                     let profile = context?.currentProfile() ?? .neutral
                     history?.record(HistoryRecord(rawText: trimmed, finalText: template, profile: profile, audioSeconds: audioSeconds))
                     transition(to: .idle)
@@ -130,6 +131,7 @@ public final class DictationController {
                 let final = await refineOrFallback(trimmed)
                 try inserter.insert(final)
                 KikiLog.log("kiki core: texto insertado")
+                delegate?.dictationDidInsert()
 
                 // History recording
                 let profile = context?.currentProfile() ?? .neutral

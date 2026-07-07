@@ -6,8 +6,17 @@ import KikiCore
 /// de la app donde el usuario está dictando.
 @MainActor
 final class HUDController {
+    /// Duración fija del pill transitorio (`showTransient`) antes de
+    /// auto-restaurar la vista normal — ver doc ahí.
+    private static let transientDuration: UInt64 = 1_200_000_000 // 1.2s en ns
+
     private let panel: NSPanel
     private let model = HUDModel()
+    /// Incrementado en cada `showTransient`: si llega uno nuevo antes de que
+    /// expire el timer del anterior (p. ej. dos toggles rápidos de ⌥⌘K), el
+    /// timer viejo se descarta sin restaurar nada — solo el más reciente
+    /// controla cuándo se auto-oculta.
+    private var transientGeneration = 0
 
     init() {
         panel = NSPanel(
@@ -54,6 +63,24 @@ final class HUDController {
             panel.orderFrontRegardless()
         } else if model.state == .idle {
             panel.orderOut(nil)
+        }
+    }
+
+    /// Pill transitorio con texto libre (p. ej. confirmación del atajo
+    /// ⌥⌘K): se muestra 1.2s y luego se auto-restaura a lo que `show(state:)`
+    /// hubiera mostrado para el `state`/`armed` vigentes en ese momento —
+    /// "respeta el estado armado" sin duplicar esa lógica aquí.
+    func showTransient(_ text: String) {
+        model.transientText = text
+        positionAtBottomCenter()
+        panel.orderFrontRegardless()
+        transientGeneration += 1
+        let generation = transientGeneration
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: Self.transientDuration)
+            guard let self, generation == self.transientGeneration else { return }
+            self.model.transientText = nil
+            self.show(state: self.model.state)
         }
     }
 

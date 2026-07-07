@@ -66,7 +66,12 @@ public final class WakeListener: @unchecked Sendable {
     }
 
     // MARK: - Tunables (nombrados, ver task-4-brief.md)
-    private static let listeningConfig = SegmenterConfig(endSilence: 0.7, maxSegmentDuration: 6)
+    /// Silencio de fin de segmento en `.listening` (esperando la frase de
+    /// activación): 0.5s en vez de los 0.7s originales — reduce la latencia
+    /// percibida frase→chime sin comerse la cola de la frase en microfonos
+    /// lentos a levantar la señal (Fase 3.6, task-361).
+    private static let listeningEndSilence: TimeInterval = 0.5
+    private static let listeningConfig = SegmenterConfig(endSilence: listeningEndSilence, maxSegmentDuration: 6)
     private static let armedConfig = SegmenterConfig(endSilence: 1.5, maxSegmentDuration: 30)
     /// Timeout de desarmado inicial: rige entre `arm()` (frase detectada) y la
     /// primera captura completa. Corto a propósito — una frase dicha sin
@@ -397,18 +402,24 @@ public final class WakeListener: @unchecked Sendable {
         }
         isTranscribing = true
         let transcriber = self.transcriber
+        let segmentSeconds = Double(samples.count) / Self.sampleRate
         // Fence de sesión: si hay un stop()+start() mientras esta tarea está
         // en vuelo, `session` cambia y el resultado se descarta al volver,
         // aunque `state` haya vuelto a `.listening` por el nuevo start().
         let capturedSession = session
         transcriptionTask = Task {
             let text: String?
+            // `Date()` es diagnóstico puro aquí (desglose de latencia en el
+            // log), no gobierna ninguna lógica testeable — está bien no
+            // medirlo por conteo de muestras como el resto de la clase.
+            let transcribeStarted = Date()
             do {
                 text = try await transcriber.transcribe(samples)
             } catch {
                 KikiLog.log("kiki wake: transcripción falló (\(error))")
                 text = nil
             }
+            let transcribeSeconds = Date().timeIntervalSince(transcribeStarted)
             self.queue.async {
                 // Solo la sesión vigente puede tocar isTranscribing /
                 // transcriptionTask: una completion stale (sesión vieja) NO
@@ -422,6 +433,11 @@ public final class WakeListener: @unchecked Sendable {
                 guard capturedSession == self.session else { return }
                 self.isTranscribing = false
                 self.transcriptionTask = nil
+                // Desglose por etapa de cada wake-check: nunca incluye el
+                // contenido del transcript (regla de privacidad — ver
+                // `applyMatch`), solo duraciones y si matcheó o no.
+                let matched = text.flatMap(WakePhraseMatcher.match) != nil
+                KikiLog.log("kiki wake: check — segmento \(String(format: "%.1f", segmentSeconds))s, transcripción \(String(format: "%.1f", transcribeSeconds))s, match \(matched ? "sí" : "no")")
                 guard self._state == .listening, let text else { return }
                 self.applyMatch(text, sampleCount: samples.count)
             }

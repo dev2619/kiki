@@ -28,6 +28,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let appContext = FrontmostAppContext()
     private var hotkey: HotkeyMonitor!
     private var escMonitor: EscMonitor!
+    private var wakeToggleShortcut: WakeToggleShortcut!
     private var hud: HUDController!
     private var wakeListener: WakeListener!
     private var wakeEnabled = UserDefaults.standard.bool(forKey: AppDelegate.wakeEnabledKey)
@@ -107,6 +108,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         })
         escMonitor.start()
+
+        wakeToggleShortcut = WakeToggleShortcut(onToggle: { [weak self] in
+            Task { @MainActor in self?.toggleWake() }
+        })
+        wakeToggleShortcut.start()
     }
 
     private func setUpStatusItem() {
@@ -151,9 +157,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Glifo de marca de kiki (barra-punto-barra-punto) como template image:
     /// negro sólido + alfa, macOS lo tiñe según la barra clara/oscura igual
     /// que los íconos del sistema. El estado del modo manos libres se refleja
-    /// con el sufijo "👂". Fallback al SF Symbol si el recurso no carga.
+    /// con la variante `MenuBarIconActive` (mismo mark + punto de estado bajo
+    /// la línea base) en vez del antiguo sufijo "👂" — `button.title` queda
+    /// SIEMPRE vacío. Fallback al SF Symbol si el recurso no carga.
     private func updateStatusIcon() {
-        if let iconURL = Bundle.main.url(forResource: "MenuBarIcon@2x", withExtension: "png"),
+        let resourceName = wakeEnabled ? "MenuBarIconActive@2x" : "MenuBarIcon@2x"
+        if let iconURL = Bundle.main.url(forResource: resourceName, withExtension: "png"),
            let glyph = NSImage(contentsOf: iconURL) {
             glyph.size = NSSize(width: 18, height: 18)
             glyph.isTemplate = true
@@ -163,7 +172,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 systemSymbolName: wakeEnabled ? "waveform" : "mic.fill",
                 accessibilityDescription: "kiki")
         }
-        statusItem.button?.title = wakeEnabled ? " 👂" : ""
+        statusItem.button?.title = ""
         statusItem.button?.imagePosition = .imageLeading
     }
 
@@ -184,11 +193,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             resumeAsArmed = false
             wakeEnabled = false
             UserDefaults.standard.set(false, forKey: Self.wakeEnabledKey)
+            SoundCues.play(.disarmed)
+            hud.showTransient("Manos libres desactivado")
         } else {
             do {
                 try wakeListener.start()
                 wakeEnabled = true
                 UserDefaults.standard.set(true, forKey: Self.wakeEnabledKey)
+                SoundCues.play(.armed)
+                hud.showTransient("Manos libres activado")
             } catch {
                 wakeStartFailed(error, context: "al activar manos libres")
                 let alert = NSAlert()
@@ -323,15 +336,23 @@ extension AppDelegate: DictationControllerDelegate {
         KikiLog.log("kiki error: \(String(describing: error))")
         hud.show(state: .idle)
     }
+
+    /// Cue "inserted": suena en AMBOS modos (hotkey y manos-libres) porque
+    /// este delegate cubre las dos rutas — `DictationController` no
+    /// distingue el origen de la captura, solo notifica tras insertar.
+    func dictationDidInsert() {
+        SoundCues.play(.inserted)
+    }
 }
 
 extension AppDelegate: WakeListenerDelegate {
     func wakeListenerDidArm() {
-        NSSound(named: "Glass")?.play()
+        SoundCues.play(.armed)
         hud.showArmed(true)
     }
 
     func wakeListenerDidStartCapture() {
+        SoundCues.play(.captureStart)
         // No hud.showArmed(false) aquí: la sesión sigue armada durante toda
         // la captura y el procesamiento — solo se desarma vía
         // wakeListenerDidDisarm (timeout/Esc) o el toggle. El pill de
@@ -363,6 +384,7 @@ extension AppDelegate: WakeListenerDelegate {
     }
 
     func wakeListenerDidDisarm() {
+        SoundCues.play(.disarmed)
         hud.showArmed(false)
         resumeAsArmed = false
         // Ver comentario equivalente en toggleWake: cubre el caso en que el

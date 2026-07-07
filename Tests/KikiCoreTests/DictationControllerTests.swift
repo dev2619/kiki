@@ -77,9 +77,11 @@ final class MockRefiner: Refining {
 final class SpyDelegate: DictationControllerDelegate {
     var states: [DictationState] = []
     var errors: [DictationError] = []
+    var insertCount = 0
 
     func dictationStateDidChange(_ state: DictationState) { states.append(state) }
     func dictationDidFail(_ error: DictationError) { errors.append(error) }
+    func dictationDidInsert() { insertCount += 1 }
 }
 
 final class MockSnippets: SnippetExpanding {
@@ -446,6 +448,24 @@ final class DictationControllerTests: XCTestCase {
         // Only the initial .recording state should have been captured
         XCTAssertEqual(delegate.states.count, statesAfterPress)
         XCTAssertTrue(delegate.errors.isEmpty)
+    }
+
+    // MARK: - Insertion Delegate Hook (Fase 3.6, task-361: cue de sonido "inserted")
+
+    func test_dictationDidInsertFiresOnInsert() async {
+        transcriber.textToReturn = "hello world"
+        controller.hotkeyPressed()
+        await controller.hotkeyReleased()
+
+        XCTAssertEqual(delegate.insertCount, 1)
+    }
+
+    func test_dictationDidInsertDoesNotFireOnInsertionFailure() async {
+        inserter.errorToThrow = DictationError.insertionFailed("no pudo pegar")
+        controller.hotkeyPressed()
+        await controller.hotkeyReleased()
+
+        XCTAssertEqual(delegate.insertCount, 0)
     }
 
     // MARK: - Snippet + History Tests (Phase 3)
