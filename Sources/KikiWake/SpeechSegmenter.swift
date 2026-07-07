@@ -2,7 +2,7 @@ import Foundation
 
 /// Configuration for the speech segmenter.
 public struct SegmenterConfig: Equatable {
-    /// RMS threshold below which audio is considered silence (default: 0.02)
+    /// RMS threshold below which audio is considered silence (default: 0.008)
     public let speechRMSThreshold: Float
 
     /// Duration of sustained silence (in seconds) required to end a speech segment
@@ -19,7 +19,7 @@ public struct SegmenterConfig: Equatable {
 
     /// Initialize with custom or default values.
     public init(
-        speechRMSThreshold: Float = 0.02,
+        speechRMSThreshold: Float = 0.008,
         endSilence: TimeInterval = 0.7,
         minSpeechDuration: TimeInterval = 0.4,
         maxSegmentDuration: TimeInterval = 30.0

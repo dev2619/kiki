@@ -47,7 +47,7 @@ final class SpeechSegmenterTests: XCTestCase {
     // MARK: - Initialization & defaults
     func testConfigDefaults() {
         let config = SegmenterConfig()
-        XCTAssertEqual(config.speechRMSThreshold, 0.02)
+        XCTAssertEqual(config.speechRMSThreshold, 0.008)
         XCTAssertEqual(config.endSilence, 0.7)
         XCTAssertEqual(config.minSpeechDuration, 0.4)
         XCTAssertGreaterThan(config.maxSegmentDuration, 0)

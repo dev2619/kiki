@@ -23,17 +23,18 @@ public protocol WakeListenerDelegate: AnyObject {
 ///
 /// ## Disciplina de concurrencia
 /// Todo el estado mutable (`_state`, `segmenter`, la tarea de transcripción en
-/// vuelo, la tarea de timeout de desarmado, `session`, `disarmGeneration`)
-/// está confinado a `queue`, una cola serial que es también la cola en la que
-/// se despachan los callbacks del tap de audio. `SpeechSegmenter` no es
-/// thread-safe, así que mantenerlo en una única cola serial evita cualquier
-/// acceso concurrente sin necesitar locks. Los métodos públicos
-/// (`start`/`stop`/`cancelCapture`) despachan de forma síncrona sobre `queue`
-/// para que el caller observe el efecto (o el throw de `start()`) antes de
-/// retornar. El accessor público `state` también usa `queue.sync`, por lo que
-/// el código interno que ya corre sobre `queue` debe usar `_state` para
-/// evitar deadlock por reentrancia. Los eventos hacia el delegate —que es
-/// `@MainActor`— saltan siempre con `Task { @MainActor in ... }`.
+/// vuelo, la tarea de timeout de desarmado, `session`, `disarmGeneration`, los
+/// contadores de calibración RMS) está confinado a `queue`, una cola serial
+/// que es también la cola en la que se despachan los callbacks del tap de
+/// audio. `SpeechSegmenter` no es thread-safe, así que mantenerlo en una
+/// única cola serial evita cualquier acceso concurrente sin necesitar locks.
+/// Los métodos públicos (`start`/`stop`/`cancelCapture`) despachan de forma
+/// síncrona sobre `queue` para que el caller observe el efecto (o el throw de
+/// `start()`) antes de retornar. El accessor público `state` también usa
+/// `queue.sync`, por lo que el código interno que ya corre sobre `queue` debe
+/// usar `_state` para evitar deadlock por reentrancia. Los eventos hacia el
+/// delegate —que es `@MainActor`— saltan siempre con `Task { @MainActor in
+/// ... }`.
 /// `@unchecked Sendable`: todo el estado mutable está confinado a `queue`
 /// (ver disciplina de concurrencia arriba); no hay acceso concurrente real,
 /// solo lo que el checker no puede probar automáticamente por sí solo.
@@ -50,6 +51,11 @@ public final class WakeListener: @unchecked Sendable {
     private static let disarmTimeoutSeconds: TimeInterval = 8
     private static let tapBufferSize: AVAudioFrameCount = 4_096
     private static let sampleRate: Double = 16_000
+    /// Ventana de calibración de RMS: duración de cada ventana y cuántas se
+    /// loggean tras cada `start()` antes de dejar de hacerlo, para no
+    /// ensuciar el log indefinidamente.
+    private static let calibrationWindowDuration: TimeInterval = 10
+    private static let calibrationMaxWindows = 6
     /// Ventana tras armar durante la cual se ignora el audio entrante: el
     /// chime "Glass" reproducido en `wakeListenerDidArm` (delegate, dispara
     /// en el MainActor apenas se detecta la frase) tarda en sonar y su propio
@@ -98,6 +104,17 @@ public final class WakeListener: @unchecked Sendable {
     /// supresión (no armado, o ventana ya consumida).
     private var suppressUntilSampleCount: Int?
 
+    /// Pico de RMS observado en la ventana de calibración vigente (solo
+    /// mientras `_state == .listening`); ver `calibrationWindowsLogged`.
+    private var calibrationPeakRMS: Float = 0
+    /// Muestras acumuladas dentro de la ventana de calibración vigente,
+    /// usado para medir los 10s por conteo de muestras (sin `Date()`).
+    private var calibrationWindowSampleCount = 0
+    /// Ventanas de calibración ya loggeadas desde el último `start()`; deja
+    /// de loggear al llegar a `calibrationMaxWindows` para no ensuciar el log
+    /// indefinidamente.
+    private var calibrationWindowsLogged = 0
+
     public init(transcriber: Transcribing) {
         self.transcriber = transcriber
     }
@@ -115,6 +132,9 @@ public final class WakeListener: @unchecked Sendable {
             isTranscribing = false
             accumulatedSampleCount = 0
             suppressUntilSampleCount = nil
+            calibrationPeakRMS = 0
+            calibrationWindowSampleCount = 0
+            calibrationWindowsLogged = 0
             let input = engine.inputNode
             let format = input.outputFormat(forBus: 0)
             input.installTap(onBus: 0, bufferSize: Self.tapBufferSize, format: format) { [weak self] buffer, _ in
@@ -173,6 +193,7 @@ public final class WakeListener: @unchecked Sendable {
         dispatchPrecondition(condition: .onQueue(queue))
         guard _state != .stopped else { return }
         accumulatedSampleCount += chunk.count
+        trackCalibrationWindow(chunk: chunk, rms: rms)
         if _state == .armed, let suppressUntil = suppressUntilSampleCount {
             guard accumulatedSampleCount >= suppressUntil else {
                 // Dentro de la ventana postArmSuppression: se descarta el
@@ -201,6 +222,28 @@ public final class WakeListener: @unchecked Sendable {
                 scheduleDisarmTimeout()
             }
         }
+    }
+
+    /// Diagnóstico de calibración: registra el pico de RMS visto en modo
+    /// `.listening` en ventanas de 10s (medidas por conteo de muestras, no
+    /// `Date()`, consistente con `postArmSuppression`), y loggea solo las
+    /// primeras `calibrationMaxWindows` (6) ventanas desde el último
+    /// `start()` — evita ensuciar el log indefinidamente mientras sigue dando
+    /// visibilidad suficiente para calibrar `speechRMSThreshold` contra el
+    /// micrófono real del usuario.
+    private func trackCalibrationWindow(chunk: [Float], rms: Float) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        guard calibrationWindowsLogged < Self.calibrationMaxWindows else { return }
+        if _state == .listening {
+            calibrationPeakRMS = max(calibrationPeakRMS, rms)
+        }
+        calibrationWindowSampleCount += chunk.count
+        let windowSamples = Int(Self.calibrationWindowDuration * Self.sampleRate)
+        guard calibrationWindowSampleCount >= windowSamples else { return }
+        calibrationWindowsLogged += 1
+        KikiLog.log("kiki wake: pico RMS últimos 10s: \(String(format: "%.4f", calibrationPeakRMS))")
+        calibrationPeakRMS = 0
+        calibrationWindowSampleCount = 0
     }
 
     private func handleSpeechStarted() {
