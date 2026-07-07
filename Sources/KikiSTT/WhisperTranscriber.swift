@@ -125,7 +125,7 @@ public actor WhisperTranscriber: Transcribing {
         // la salida). Requiere tokens ya codificados; se obtienen con
         // `whisperKit.tokenizer?.encode(text:)` (protocolo `WhisperTokenizer`,
         // `Core/Models.swift`).
-        if let promptTokens = dictionaryPromptTokens() {
+        if let promptTokens = dictionaryPromptTokens(language: language) {
             options.promptTokens = promptTokens
         }
         KikiLog.log("kiki stt: inferencia iniciada (\(samples.count) muestras) — la primera tras arrancar puede tardar por compilación ANE/CoreML")
@@ -140,24 +140,45 @@ public actor WhisperTranscriber: Transcribing {
     /// prompt tokenizado no supere `maxDictionaryPromptTokens`. Devuelve `nil` si no
     /// hay proveedor, no hay términos, el tokenizer todavía no está disponible, o ni
     /// siquiera el primer término entra en el presupuesto.
-    private func dictionaryPromptTokens() -> [Int]? {
+    private func dictionaryPromptTokens(language: String) -> [Int]? {
         guard let terms = dictionaryProvider?.terms(), !terms.isEmpty else { return nil }
         guard let tokenizer = whisperKit?.tokenizer else { return nil }
+
+        let header = language == "en" ? "Dictionary: " : "Glosario: "
+        guard let promptText = Self.packTerms(
+            terms,
+            header: header,
+            budget: Self.maxDictionaryPromptTokens,
+            encode: { tokenizer.encode(text: $0) }
+        ) else {
+            return nil
+        }
+        return tokenizer.encode(text: promptText)
+    }
+
+    /// Pure function to pack terms into a prompt text within a token budget.
+    /// Packs whole terms (not partial) while staying within the budget; drops
+    /// overflowing terms. Header is included in token count.
+    /// - Returns: Final prompt text (header + packed terms joined by ", "), or nil
+    ///   if no provider, empty terms, or even the first term overflows the budget.
+    static func packTerms(
+        _ terms: [String],
+        header: String,
+        budget: Int,
+        encode: (String) -> [Int]
+    ) -> String? {
+        guard !terms.isEmpty else { return nil }
 
         var included: [String] = []
         for term in terms {
             let candidate = included + [term]
-            let candidateText = Self.promptText(for: candidate)
-            guard tokenizer.encode(text: candidateText).count <= Self.maxDictionaryPromptTokens else {
+            let candidateText = header + candidate.joined(separator: ", ")
+            guard encode(candidateText).count <= budget else {
                 break
             }
             included = candidate
         }
         guard !included.isEmpty else { return nil }
-        return tokenizer.encode(text: Self.promptText(for: included))
-    }
-
-    private static func promptText(for terms: [String]) -> String {
-        "Glosario: " + terms.joined(separator: ", ")
+        return header + included.joined(separator: ", ")
     }
 }
