@@ -214,4 +214,109 @@ final class RefinePromptTests: XCTestCase {
             system.contains("Términos del usuario (respeta su escritura exacta): Docker"),
             "Dictionary line must be present alongside the profile suffix")
     }
+
+    // MARK: - Language Pin (fidelity fix)
+    //
+    // Field evidence: Whisper correctly detected English ("Are you understand
+    // my English or not?") but the refiner only got a Spanish "keep the
+    // original language" instruction, which Qwen 3B did not honor — it
+    // mistranslated to "¿Estás entendido mi inglés?" and sometimes
+    // hallucinated content. The fix hard-pins the output language explicitly
+    // instead of relying on the generic "preserve language" rule alone.
+
+    func testDefaultLanguageIsSpanish() {
+        let withDefault = RefinePrompt.messages(for: "test", profile: .neutral)
+        let withExplicitEs = RefinePrompt.messages(for: "test", profile: .neutral, language: "es")
+        XCTAssertEqual(withDefault.system, withExplicitEs.system, "Omitting language must behave exactly like language: \"es\" — preserves existing call sites")
+    }
+
+    func testSpanishLanguagePinsOutputToSpanish() {
+        let (system, _) = RefinePrompt.messages(for: "test", profile: .neutral, language: "es")
+        XCTAssertTrue(
+            system.contains("SIEMPRE en español"),
+            "Spanish system prompt must hard-pin the output language")
+        XCTAssertTrue(
+            system.contains("NUNCA traduzcas"),
+            "Spanish system prompt must explicitly forbid translating")
+    }
+
+    func testEnglishLanguagePinsOutputToEnglish() {
+        let (system, _) = RefinePrompt.messages(for: "test", profile: .neutral, language: "en")
+        XCTAssertTrue(
+            system.contains("ALWAYS in English"),
+            "English system prompt must hard-pin the output language")
+        XCTAssertTrue(
+            system.contains("NEVER translate"),
+            "English system prompt must explicitly forbid translating")
+    }
+
+    func testEnglishLanguageWritesWholePromptInEnglish() {
+        // A small model drifts less from the target output language when the
+        // whole instruction is already in that language, not just the pin.
+        let (system, _) = RefinePrompt.messages(for: "test", profile: .neutral, language: "en")
+        XCTAssertTrue(system.contains("dictation editor"), "English prompt must be written in English, not just append an English pin to the Spanish prompt")
+        XCTAssertFalse(system.contains("editor de dictado"), "English prompt must not contain the Spanish base instruction")
+    }
+
+    func testEnglishProfileSuffixesAreInEnglish() {
+        let (codeSystem, _) = RefinePrompt.messages(for: "test", profile: .code, language: "en")
+        XCTAssertTrue(codeSystem.contains("code editor/terminal"))
+        XCTAssertFalse(codeSystem.contains("editor de código"))
+
+        let (chatSystem, _) = RefinePrompt.messages(for: "test", profile: .chat, language: "en")
+        XCTAssertTrue(chatSystem.contains("casual chat"))
+    }
+
+    func testEnglishDictionaryTermsUseEnglishHeader() {
+        let (system, _) = RefinePrompt.messages(
+            for: "test", profile: .neutral, dictionaryTerms: ["Kubernetes"], language: "en")
+        XCTAssertTrue(system.contains("User terms (respect their exact spelling): Kubernetes"))
+    }
+
+    func testUnknownLanguageFallsBackToSpanish() {
+        // Any value other than "en" is treated as Spanish — matches
+        // WhisperTranscriber's own `detected == "en" ? "en" : "es"` policy.
+        let (system, _) = RefinePrompt.messages(for: "test", profile: .neutral, language: "fr")
+        XCTAssertTrue(system.contains("SIEMPRE en español"))
+    }
+
+    // MARK: - Translate Mode (opt-in feature)
+
+    func testTranslateSpanishToEnglish() {
+        let (system, _) = RefinePrompt.messages(for: "hola", profile: .neutral, language: "es", translate: true)
+        XCTAssertTrue(system.contains("Traduce el texto al inglés"), "Detected Spanish + translate ON must target English")
+        XCTAssertTrue(system.contains("Responde ÚNICAMENTE con la traducción"))
+    }
+
+    func testTranslateEnglishToSpanish() {
+        let (system, _) = RefinePrompt.messages(for: "hello", profile: .neutral, language: "en", translate: true)
+        XCTAssertTrue(system.contains("Traduce el texto al español"), "Detected English + translate ON must target Spanish")
+        XCTAssertTrue(system.contains("Responde ÚNICAMENTE con la traducción"))
+    }
+
+    func testTranslateModeDoesNotIncludeRefineRules() {
+        // Translate is a distinct mode, not refine-plus-pin: the cleanup
+        // rules/meta-utterance guard from the refine prompt should not leak in.
+        let (system, _) = RefinePrompt.messages(for: "hola", profile: .neutral, language: "es", translate: true)
+        XCTAssertFalse(system.contains("editor de dictado"))
+        XCTAssertFalse(system.contains("NUNCA traduzcas"), "Translate mode must not carry the 'never translate' refine pin")
+    }
+
+    func testTranslateModeIncludesDictionaryTerms() {
+        let (system, _) = RefinePrompt.messages(
+            for: "hola", profile: .neutral, dictionaryTerms: ["Kubernetes"], language: "es", translate: true)
+        XCTAssertTrue(system.contains("Términos del usuario (respeta su escritura exacta): Kubernetes"))
+    }
+
+    func testTranslateDefaultIsOff() {
+        // Omitting `translate` must behave exactly like translate: false.
+        let withDefault = RefinePrompt.messages(for: "test", profile: .neutral, language: "en")
+        let withExplicitFalse = RefinePrompt.messages(for: "test", profile: .neutral, language: "en", translate: false)
+        XCTAssertEqual(withDefault.system, withExplicitFalse.system)
+    }
+
+    func testTranslateUserMessageIsExactInputText() {
+        let (_, user) = RefinePrompt.messages(for: "hola mundo", profile: .neutral, language: "es", translate: true)
+        XCTAssertEqual(user, "hola mundo", "Translate mode must not alter the user message either")
+    }
 }

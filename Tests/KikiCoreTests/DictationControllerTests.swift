@@ -57,11 +57,15 @@ final class MockRefiner: Refining {
     var errorToThrow: Error?
     var receivedTexts: [String] = []
     var receivedProfiles: [AppProfile] = []
+    var receivedLanguages: [String] = []
+    var receivedTranslateFlags: [Bool] = []
     var delaySeconds: TimeInterval = 0
 
-    func refine(_ text: String, profile: AppProfile) async throws -> String {
+    func refine(_ text: String, profile: AppProfile, language: String = "es", translate: Bool = false) async throws -> String {
         receivedTexts.append(text)
         receivedProfiles.append(profile)
+        receivedLanguages.append(language)
+        receivedTranslateFlags.append(translate)
         if delaySeconds > 0 {
             try await Task.sleep(nanoseconds: UInt64(delaySeconds * 1_000_000_000))
         }
@@ -70,6 +74,16 @@ final class MockRefiner: Refining {
             throw DictationError.transcriptionFailed("MockRefiner: no text to return")
         }
         return textToReturn
+    }
+}
+
+/// Mock de `LanguageDetecting` (Fase: fidelidad de idioma). Simula el idioma
+/// que `WhisperTranscriber` habría detectado para la última transcripción.
+final class MockLanguageProvider: LanguageDetecting {
+    var languageToReturn = "es"
+
+    func detectedLanguage() async -> String {
+        languageToReturn
     }
 }
 
@@ -709,5 +723,162 @@ final class DictationControllerTests: XCTestCase {
 
         XCTAssertEqual(refiner.receivedTexts, [boundaryText], "Refiner must be invoked at exactly minRefinableLength")
         XCTAssertEqual(inserter.inserted, ["refined boundary text"])
+    }
+
+    // MARK: - Language Threading (fidelity fix: field bug — Whisper detects
+    // the spoken language correctly, but it never reached the refiner, so
+    // Qwen 3B mistranslated/hallucinated English dictation into bad Spanish.
+    // `languageProvider` (optional, nil by default) is how the detected
+    // language reaches `Refining.refine`.
+
+    func test_nilLanguageProviderDefaultsToSpanish() async {
+        let refiner = MockRefiner()
+        refiner.textToReturn = "refined"
+        let context = MockContext()
+        controller = DictationController(
+            recorder: recorder, transcriber: transcriber, inserter: inserter,
+            refiner: refiner, context: context, minRefinableLength: 0,
+            languageProvider: nil)
+        controller.delegate = delegate
+
+        transcriber.textToReturn = "raw text"
+        controller.hotkeyPressed()
+        await controller.hotkeyReleased()
+
+        XCTAssertEqual(refiner.receivedLanguages, ["es"], "Without a languageProvider, language must default to \"es\" — the pre-fix behavior — so existing setups keep working unchanged")
+    }
+
+    func test_languageProviderThreadsDetectedLanguageToRefiner() async {
+        let refiner = MockRefiner()
+        refiner.textToReturn = "refined"
+        let context = MockContext()
+        let languageProvider = MockLanguageProvider()
+        languageProvider.languageToReturn = "en"
+        controller = DictationController(
+            recorder: recorder, transcriber: transcriber, inserter: inserter,
+            refiner: refiner, context: context, minRefinableLength: 0,
+            languageProvider: languageProvider)
+        controller.delegate = delegate
+
+        transcriber.textToReturn = "are you understanding my english"
+        controller.hotkeyPressed()
+        await controller.hotkeyReleased()
+
+        XCTAssertEqual(refiner.receivedLanguages, ["en"], "Detected language from the languageProvider must reach the refiner")
+    }
+
+    func test_processTranscriptThreadsLanguageFromProvider() async {
+        let refiner = MockRefiner()
+        refiner.textToReturn = "refined"
+        let context = MockContext()
+        let languageProvider = MockLanguageProvider()
+        languageProvider.languageToReturn = "en"
+        controller = DictationController(
+            recorder: recorder, transcriber: transcriber, inserter: inserter,
+            refiner: refiner, context: context, minRefinableLength: 0,
+            languageProvider: languageProvider)
+        controller.delegate = delegate
+
+        await controller.processTranscript("hello world")
+
+        XCTAssertEqual(refiner.receivedLanguages, ["en"], "processTranscript (same-breath wake path) must also thread the detected language")
+    }
+
+    // MARK: - Translate Mode (opt-in feature: default OFF, pins output to the
+    // OTHER language when ON; bypasses minRefinableLength and relaxes the
+    // length guards since translation legitimately changes text length)
+
+    func test_translateDisabledByDefault() async {
+        let refiner = MockRefiner()
+        refiner.textToReturn = "refined"
+        let context = MockContext()
+        controller = DictationController(
+            recorder: recorder, transcriber: transcriber, inserter: inserter,
+            refiner: refiner, context: context, minRefinableLength: 0)
+        controller.delegate = delegate
+
+        transcriber.textToReturn = "raw text"
+        controller.hotkeyPressed()
+        await controller.hotkeyReleased()
+
+        XCTAssertEqual(refiner.receivedTranslateFlags, [false], "translateEnabled defaults to a closure returning false")
+    }
+
+    func test_translateFlagPassedToRefinerWhenEnabled() async {
+        let refiner = MockRefiner()
+        refiner.textToReturn = "translated"
+        let context = MockContext()
+        controller = DictationController(
+            recorder: recorder, transcriber: transcriber, inserter: inserter,
+            refiner: refiner, context: context, minRefinableLength: 0,
+            translateEnabled: { true })
+        controller.delegate = delegate
+
+        transcriber.textToReturn = "raw text"
+        controller.hotkeyPressed()
+        await controller.hotkeyReleased()
+
+        XCTAssertEqual(refiner.receivedTranslateFlags, [true])
+    }
+
+    func test_translateBypassesMinRefinableLength() async {
+        let refiner = MockRefiner()
+        refiner.textToReturn = "hi"
+        let context = MockContext()
+        // minRefinableLength stays at its normal default (25) — translate
+        // must bypass it, not require callers to also pass minRefinableLength: 0.
+        controller = DictationController(
+            recorder: recorder, transcriber: transcriber, inserter: inserter,
+            refiner: refiner, context: context,
+            translateEnabled: { true })
+        controller.delegate = delegate
+
+        transcriber.textToReturn = "hola" // 4 chars, far under minRefinableLength
+        controller.hotkeyPressed()
+        await controller.hotkeyReleased()
+
+        XCTAssertEqual(refiner.receivedTexts, ["hola"], "Translate mode must invoke the refiner even for very short text")
+        XCTAssertEqual(inserter.inserted, ["hi"])
+    }
+
+    func test_translateRelaxesSuspiciouslyLongGuard() async {
+        let refiner = MockRefiner()
+        // 50 raw chars: normal ceiling is 50*2+40=140, translate's relaxed
+        // ceiling is 50*3.5=175. A 150-char translation exceeds the normal
+        // guard (would wrongly fall back to raw) but fits under translate's.
+        let raw = String(repeating: "a", count: 50)
+        refiner.textToReturn = String(repeating: "x", count: 150)
+        let context = MockContext()
+        controller = DictationController(
+            recorder: recorder, transcriber: transcriber, inserter: inserter,
+            refiner: refiner, context: context, minRefinableLength: 0,
+            translateEnabled: { true })
+        controller.delegate = delegate
+
+        transcriber.textToReturn = raw
+        controller.hotkeyPressed()
+        await controller.hotkeyReleased()
+
+        XCTAssertEqual(inserter.inserted, [String(repeating: "x", count: 150)], "Translate mode's relaxed ceiling (3.5x, no +40 slack) must accept a 150-char translation of 50-char input that the normal 2x+40=140 guard would reject")
+    }
+
+    func test_translateRelaxesSuspiciouslyShortGuard() async {
+        let refiner = MockRefiner()
+        // 60 raw chars * 0.3 = 18; a 20-char translation is below the normal
+        // 1/3 threshold (20) but still passes the relaxed 0.3x (18) floor.
+        let raw = String(repeating: "a", count: 60)
+        refiner.textToReturn = String(repeating: "b", count: 19)
+        let context = MockContext()
+        controller = DictationController(
+            recorder: recorder, transcriber: transcriber, inserter: inserter,
+            refiner: refiner, context: context, minRefinableLength: 0,
+            translateEnabled: { true })
+        controller.delegate = delegate
+
+        transcriber.textToReturn = raw
+        controller.hotkeyPressed()
+        await controller.hotkeyReleased()
+
+        XCTAssertEqual(inserter.inserted, [String(repeating: "b", count: 19)], "Translate mode's relaxed floor (0.3x) must accept a shorter translation that the normal 1/3 guard would reject")
     }
 }

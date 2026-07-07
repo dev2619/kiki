@@ -110,13 +110,16 @@ public final class LLMRefiner: Refining {
         KikiLog.log("kiki refine: modelo cargado (\(Self.preferredModel)) en \(String(format: "%.1f", Date().timeIntervalSince(started)))s")
     }
 
-    public func refine(_ text: String, profile: AppProfile) async throws -> String {
+    public func refine(
+        _ text: String, profile: AppProfile, language: String = "es", translate: Bool = false
+    ) async throws -> String {
         guard isReady, let modelContainer else {
             throw DictationError.transcriptionFailed("LLM no cargado")
         }
 
         let dictionaryTerms = dictionaryProvider?.terms() ?? []
-        let (system, user) = RefinePrompt.messages(for: text, profile: profile, dictionaryTerms: dictionaryTerms)
+        let (system, user) = RefinePrompt.messages(
+            for: text, profile: profile, dictionaryTerms: dictionaryTerms, language: language, translate: translate)
         let messages: [Chat.Message] = [.system(system), .user(user)]
 
         let started = Date()

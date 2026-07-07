@@ -127,4 +127,66 @@ final class LLMRefinerIntegrationTests: XCTestCase {
             refined.count, 20,
             "el LLM devolvió una respuesta corta y degenerada en vez de reescribir el dictado: \"\(refined)\"")
     }
+
+    /// Prueba real del BUG DE FIDELIDAD que motiva esta fase entera —
+    /// evidencia de campo: Whisper detectó correctamente inglés para "Are
+    /// you understand my English or not?" y "how you are translating my
+    /// language", pero como ese idioma nunca llegaba al refinador, Qwen 3B
+    /// mistradujo/alucinó: "¿Estás entendido mi inglés?" y "I am translating
+    /// your language...". Antes de este fix, `refine()` no tenía forma de
+    /// recibir el idioma detectado — solo el prompt en español genérico de
+    /// "conserva el idioma". Con `language: "en"` (lo que
+    /// `DictationController` ahora pasa vía `LanguageDetecting`), el system
+    /// prompt entero se escribe en inglés y fija explícitamente la salida —
+    /// este test corre el modelo real y verifica que la salida se queda en
+    /// inglés (translate OFF, el default).
+    func test_englishDictationStaysEnglishWithTranslateOff() async throws {
+        try XCTSkipUnless(
+            ProcessInfo.processInfo.environment["KIKI_LLM_TEST"] == "1",
+            "gated: exportar KIKI_LLM_TEST=1 (descarga el modelo, ~1.8GB)")
+
+        let refiner = LLMRefiner()
+        try await refiner.prepare()
+        XCTAssertTrue(refiner.isReady)
+
+        let raw = "are you understanding my english or not"
+        let refined = try await refiner.refine(raw, profile: .chat, language: "en", translate: false)
+        print("kiki test evidence — test_englishDictationStaysEnglishWithTranslateOff output: \"\(refined)\"")
+
+        let lower = refined.lowercased()
+        // Palabras españolas que aparecieron en la mistraducción de campo
+        // ("¿Estás entendido mi inglés?") — su ausencia es la señal directa
+        // de que el fix de fidelidad funcionó.
+        XCTAssertFalse(lower.contains("estás"), "el refinado tradujo al español en vez de quedarse en inglés: \(refined)")
+        XCTAssertFalse(lower.contains("entendido"), "el refinado tradujo al español en vez de quedarse en inglés: \(refined)")
+        XCTAssertTrue(
+            lower.contains("understand") || lower.contains("understanding"),
+            "el refinado debía conservar el contenido en inglés: \(refined)")
+        XCTAssertTrue(lower.contains("english"), "el refinado debía mencionar 'english': \(refined)")
+    }
+
+    /// Contraparte del test anterior con `translate: true`: el mismo dictado
+    /// en inglés, pero ahora pidiendo explícitamente la traducción al
+    /// español — Fix 2 (modo traducción opt-in). Verifica que el modelo real
+    /// SÍ traduce cuando se le pide (a diferencia del test de arriba, donde
+    /// NO debe hacerlo).
+    func test_translateOnTranslatesEnglishToSpanish() async throws {
+        try XCTSkipUnless(
+            ProcessInfo.processInfo.environment["KIKI_LLM_TEST"] == "1",
+            "gated: exportar KIKI_LLM_TEST=1 (descarga el modelo, ~1.8GB)")
+
+        let refiner = LLMRefiner()
+        try await refiner.prepare()
+        XCTAssertTrue(refiner.isReady)
+
+        let raw = "how are you translating my language"
+        let refined = try await refiner.refine(raw, profile: .chat, language: "en", translate: true)
+        print("kiki test evidence — test_translateOnTranslatesEnglishToSpanish output: \"\(refined)\"")
+
+        let lower = refined.lowercased()
+        XCTAssertFalse(lower.contains("how are you"), "translate ON debía traducir, no devolver el inglés original: \(refined)")
+        XCTAssertTrue(
+            lower.contains("traduc") || lower.contains("idioma") || lower.contains("cómo") || lower.contains("como"),
+            "el refinado debía ser una traducción al español reconocible: \(refined)")
+    }
 }

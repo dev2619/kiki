@@ -24,7 +24,7 @@ import WhisperKit
 /// variable de encadenado — la exclusión mutua real de las inferencias viene
 /// de que cada eslabón espera al anterior, no del actor en sí (un actor por
 /// sí solo permite reentrancia en sus puntos de `await`).
-public actor WhisperTranscriber: Transcribing {
+public actor WhisperTranscriber: Transcribing, LanguageDetecting {
     /// Identificador de modelo resuelto contra el repo HF `argmaxinc/whisperkit-coreml`
     /// (WhisperKit hace glob-match del `model:` contra las carpetas del repo;
     /// comportamiento verificado en 1.0.0, ver nota de versión en `Package.swift`).
@@ -44,6 +44,17 @@ public actor WhisperTranscriber: Transcribing {
 
     private var whisperKit: WhisperKit?
     public private(set) var isReady = false
+    /// Idioma detectado en la ÚLTIMA transcripción ("es"/"en"), fijado en
+    /// `doTranscribe` antes de devolver el texto. Fase: fidelidad de idioma —
+    /// evidencia de campo confirmó que Whisper detecta correctamente es/en
+    /// pero ese dato se perdía: el refinador (Qwen 3B) solo recibía el texto
+    /// + una instrucción en español de "conserva el idioma", que el modelo
+    /// pequeño no respeta de forma confiable (mistraducía inglés a español
+    /// roto, o alucinaba). Exponer esta propiedad permite que
+    /// `DictationController` (vía `LanguageDetecting.detectedLanguage()`)
+    /// fije el idioma de salida del refinado explícitamente en vez de
+    /// dejarlo a la deriva. Default "es" antes de la primera transcripción.
+    public private(set) var lastDetectedLanguage: String = "es"
     /// Enlace de la cadena de serialización, ver doc del tipo.
     private var activeTranscription: Task<String, Error>?
     /// Diccionario personal del usuario (Fase 3, Task 3/4). `weak` porque el
@@ -66,6 +77,14 @@ public actor WhisperTranscriber: Transcribing {
     /// actor: los llamadores externos deben hacer `await transcriber.setDictionaryProvider(...)`.
     public func setDictionaryProvider(_ provider: DictionaryProviding?) {
         dictionaryProvider = provider
+    }
+
+    /// Conformidad a `LanguageDetecting`: reenvía `lastDetectedLanguage`. No
+    /// puede ser esa misma propiedad (un protocolo no puede requerir un
+    /// `func` con el nombre base de una propiedad almacenada del conformer —
+    /// ver doc de `LanguageDetecting`).
+    public func detectedLanguage() -> String {
+        lastDetectedLanguage
     }
 
     /// Carga (y si hace falta descarga) el modelo. Llamar una vez al arrancar.
@@ -109,6 +128,7 @@ public actor WhisperTranscriber: Transcribing {
         // se trata como español (idioma primario del producto en Fase 1).
         let (detected, _) = try await whisperKit.detectLangauge(audioArray: samples)
         let language = detected == "en" ? "en" : "es"
+        lastDetectedLanguage = language
         KikiLog.log("kiki stt: idioma \(language) (whisper detectó \(detected))")
         var options = DecodingOptions()
         options.task = .transcribe

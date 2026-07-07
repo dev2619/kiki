@@ -34,6 +34,8 @@ public final class DictationController {
     private let snippets: SnippetExpanding?
     private let history: HistoryRecording?
     private let minRefinableLength: Int
+    private let languageProvider: LanguageDetecting?
+    private let translateEnabled: () -> Bool
 
     public init(
         recorder: AudioRecording,
@@ -46,7 +48,9 @@ public final class DictationController {
         refineTimeout: TimeInterval = 5,
         snippets: SnippetExpanding? = nil,
         history: HistoryRecording? = nil,
-        minRefinableLength: Int = 25
+        minRefinableLength: Int = 25,
+        languageProvider: LanguageDetecting? = nil,
+        translateEnabled: @escaping () -> Bool = { false }
     ) {
         self.recorder = recorder
         self.transcriber = transcriber
@@ -59,6 +63,8 @@ public final class DictationController {
         self.snippets = snippets
         self.history = history
         self.minRefinableLength = minRefinableLength
+        self.languageProvider = languageProvider
+        self.translateEnabled = translateEnabled
     }
 
     public func hotkeyPressed() {
@@ -97,7 +103,8 @@ public final class DictationController {
             let started = Date()
             let text = try await transcriber.transcribe(samples)
             KikiLog.log("kiki core: transcripción lista en \(String(format: "%.2f", Date().timeIntervalSince(started)))s — \(text.count) chars: \"\(text)\"")
-            await processTranscriptContent(text, audioSeconds: audioSeconds)
+            let language = await languageProvider?.detectedLanguage() ?? "es"
+            await processTranscriptContent(text, audioSeconds: audioSeconds, language: language)
         } catch let error as DictationError {
             transition(to: .idle)
             delegate?.dictationDidFail(error)
@@ -112,10 +119,16 @@ public final class DictationController {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         transition(to: .processing)
-        await processTranscriptContent(text, audioSeconds: 0)
+        // Este texto ya fue transcrito por otro llamador (p. ej. el "mismo
+        // aliento" de WakeListener) usando el MISMO WhisperTranscriber
+        // compartido con el hotkey — el actor serializa sus llamadas (ver
+        // doc de `WhisperTranscriber`), así que `languageProvider` todavía
+        // refleja el idioma de ESA transcripción cuando llegamos aquí.
+        let language = await languageProvider?.detectedLanguage() ?? "es"
+        await processTranscriptContent(text, audioSeconds: 0, language: language)
     }
 
-    private func processTranscriptContent(_ text: String, audioSeconds: Double = 0) async {
+    private func processTranscriptContent(_ text: String, audioSeconds: Double = 0, language: String = "es") async {
         do {
             let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
             if !trimmed.isEmpty {
@@ -131,7 +144,7 @@ public final class DictationController {
                 }
 
                 // Phase 2: Refinement
-                let final = await refineOrFallback(trimmed)
+                let final = await refineOrFallback(trimmed, language: language)
                 try inserter.insert(final)
                 KikiLog.log("kiki core: texto insertado")
                 delegate?.dictationDidInsert()
@@ -164,22 +177,32 @@ public final class DictationController {
         delegate?.dictationStateDidChange(newState)
     }
 
-    private func refineOrFallback(_ text: String) async -> String {
+    private func refineOrFallback(_ text: String, language: String) async -> String {
         guard let refiner else { return text }
+        let translate = translateEnabled()
         // Fragmentos cortos no tienen muletillas que limpiar y el LLM
         // pequeño los daña — evidencia de campo: "Necesito que transcribas"
         // (24 chars) volvió "transcribas"; "¿Qué escuchas?" volvió
         // "¿Qué escucha?". Por debajo del umbral, el refinado hace más daño
-        // que bien: se salta directo al texto crudo.
-        guard text.count >= minRefinableLength else {
+        // que bien: se salta directo al texto crudo. NO aplica en modo
+        // traducción: traducir "hola" es una operación válida incluso para
+        // texto muy corto — el umbral es una heurística de limpieza de
+        // muletillas, no de traducción.
+        guard translate || text.count >= minRefinableLength else {
             KikiLog.log("kiki core: texto corto — sin refinado")
             return text
         }
         let profile = context?.currentProfile() ?? .neutral
+        // Guardias de longitud (ver abajo): traducir cambia legítimamente el
+        // largo del texto (es→en / en→es no son 1:1), así que en modo
+        // traducción se relajan de 0.33x–2x(+40) a 0.3x–3.5x.
+        let minRatio = translate ? 0.3 : (1.0 / 3.0)
+        let maxRatio = translate ? 3.5 : 2.0
+        let maxSlack = translate ? 0 : 40
         do {
             let started = Date()
             let refined = try await withThrowingTimeout(seconds: refineTimeout) {
-                try await refiner.refine(text, profile: profile)
+                try await refiner.refine(text, profile: profile, language: language, translate: translate)
             }
             let trimmedRefined = refined.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmedRefined.isEmpty else {
@@ -193,7 +216,7 @@ public final class DictationController {
             // (p. ej. tratarlo como una pregunta y devolver una respuesta
             // corta tipo "Gracias.") — insertar eso sería peor que insertar
             // el texto crudo de Whisper.
-            guard trimmedRefined.count >= text.count / 3 else {
+            guard Double(trimmedRefined.count) >= Double(text.count) * minRatio else {
                 KikiLog.log("kiki core: refinado sospechosamente corto — uso texto crudo")
                 return text
             }
@@ -203,11 +226,11 @@ public final class DictationController {
             // en vez de solo limpiar) o de una generación descarrilada. En
             // cualquier caso, insertar eso sería peor que insertar el texto
             // crudo de Whisper.
-            guard trimmedRefined.count <= text.count * 2 + 40 else {
+            guard Double(trimmedRefined.count) <= Double(text.count) * maxRatio + Double(maxSlack) else {
                 KikiLog.log("kiki core: refinado sospechosamente largo — uso texto crudo")
                 return text
             }
-            KikiLog.log("kiki core: refinado (\(profile.rawValue)) en \(String(format: "%.2f", Date().timeIntervalSince(started)))s: \"\(trimmedRefined)\"")
+            KikiLog.log("kiki core: refinado (\(profile.rawValue), idioma \(language), traducir \(translate)) en \(String(format: "%.2f", Date().timeIntervalSince(started)))s: \"\(trimmedRefined)\"")
             return trimmedRefined
         } catch {
             KikiLog.log("kiki core: refinado falló (\(error)) — uso texto crudo")

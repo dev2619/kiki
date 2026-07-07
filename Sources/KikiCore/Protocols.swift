@@ -52,7 +52,16 @@ public protocol ContextProviding: AnyObject {
 
 public protocol Refining: AnyObject {
     /// Devuelve el texto refinado. Lanza si falla; el controller degrada a crudo.
-    func refine(_ text: String, profile: AppProfile) async throws -> String
+    ///
+    /// - Parameters:
+    ///   - language: Idioma detectado por Whisper para este dictado ("es"/"en").
+    ///     Se usa para FIJAR el idioma de salida del refinado — ver
+    ///     `RefinePrompt` — en vez de dejar que el LLM adivine/derive al
+    ///     español por defecto (bug de fidelidad, ver `DictationController`).
+    ///   - translate: Cuando es `true`, el refinado traduce el texto AL OTRO
+    ///     idioma (es→en / en→es) en vez de solo limpiarlo en el idioma
+    ///     detectado. Modo opt-in (Ajustes → "Traducir al dictar").
+    func refine(_ text: String, profile: AppProfile, language: String, translate: Bool) async throws -> String
 }
 
 public struct HistoryRecord: Equatable {
@@ -80,4 +89,23 @@ public protocol SnippetExpanding: AnyObject {
 
 public protocol DictionaryProviding: AnyObject {
     func terms() -> [String]
+}
+
+/// Expone el idioma detectado por Whisper en la transcripción más reciente
+/// (Fase: fidelidad de idioma). `WhisperTranscriber` es un actor y ya expone
+/// una propiedad `lastDetectedLanguage`, pero un protocolo no puede tener un
+/// requerimiento `func` con el mismo nombre base que una propiedad
+/// almacenada del mismo tipo (colisión de declaración) — de ahí el nombre
+/// `detectedLanguage()` distinto para el requerimiento del protocolo, que
+/// internamente solo reenvía esa propiedad. Declarado `async` porque el
+/// conformer real es un actor: el acceso desde fuera de su aislamiento
+/// siempre requiere `await`, aun cuando el cuerpo de la implementación sea
+/// síncrono puertas adentro.
+///
+/// Optional por diseño: `DictationController` recibe un
+/// `languageProvider: LanguageDetecting?` con default `nil`, que hace que el
+/// idioma caiga a `"es"` — el comportamiento previo a este fix — así los 30+
+/// tests existentes del controller compilan y pasan sin tocarlos.
+public protocol LanguageDetecting: AnyObject {
+    func detectedLanguage() async -> String
 }
