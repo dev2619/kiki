@@ -281,7 +281,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @MainActor @objc private func toggleWake() {
         if wakeEnabled {
-            wakeListener.stop()
+            // stopAndFlush() (no stop() liso): apagar manos-libres es un
+            // "ya terminé de hablar" intencional del usuario — si había un
+            // segmento de habla en curso sin cerrar (típicamente por ruido
+            // ambiente que ni el drop relativo pudo despejar, ver
+            // `SpeechSegmenter.endDropRatio`), se vuelca y se pega en vez de
+            // perderse. Ruteado también desde ⌥⌘K con manos-libres ON, ver
+            // `wakeToggleShortcut` más abajo. Contraste con el `stop()` liso
+            // (descarta) usado por la coordinación de pausa por dictado en
+            // `dictationStateDidChange` y por `cancelCapture()`/Esc — esos
+            // son "pausar"/"cancelar", no "ya terminé".
+            wakeListener.stopAndFlush()
             hud.showArmed(false)
             // Si el toggle se apaga a mitad de una captura manos-libres (HUD
             // mostrando "Escuchando…" desde wakeListenerDidStartCapture), el

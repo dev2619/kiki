@@ -438,29 +438,80 @@ public final class WakeListener: @unchecked Sendable {
     public func stop() {
         queue.sync {
             guard _state != .stopped else { return }
-            engine.inputNode.removeTap(onBus: 0)
-            engine.stop()
-            cancelDisarmTimeout()
-            transcriptionTask?.cancel()
-            transcriptionTask = nil
-            isTranscribing = false
-            pendingSegment = nil
-            session += 1
-            // Ver doc de `notificationEpoch`: invalida cualquier notificación
-            // al delegate que ya haya sido despachada (Task@MainActor
-            // encolada) pero que todavía no haya corrido.
-            notificationEpoch += 1
-            flushPartialCalibrationWindow()
-            // Capturar el piso aprendido ANTES del reset() que lo borra de
-            // la instancia: el próximo start()/resumeArmed() lo re-siembra
-            // vía makeSegmenter (ver lastKnownNoiseFloor).
-            if let learned = segmenter.noiseFloor {
-                lastKnownNoiseFloor = learned
-            }
-            segmenter.reset()
-            _state = .stopped
+            performStop()
             KikiLog.log("kiki wake: detenido")
         }
+    }
+
+    /// Como `stop()`, pero para el path de apagado INTENCIONAL del usuario
+    /// (⌥⌘K con manos-libres ON → `AppDelegate.toggleWake` rama OFF, y el
+    /// toggle del menú — ambos convergen en `toggleWake()`): si hay un
+    /// segmento de habla en curso (`.armed`, ya en `.speech` dentro del
+    /// segmenter, ≥ `minSpeechDuration`), lo vuelca por el camino normal de
+    /// entrega (`wakeListenerDidCapture`, mismo fenceo por sesión que
+    /// `handleSegmentEnded`) en vez de descartarlo. "Termino el manos libres"
+    /// debe pegar lo que ya se dijo, no perderlo — sobre todo porque la
+    /// detección de fin de habla por energía (incluso con el drop relativo,
+    /// ver `SpeechSegmenter.endDropRatio`) no puede garantizar detectar el
+    /// fin en TODO cuarto ruidoso; esto es el escape manual para cuando no
+    /// lo logra.
+    ///
+    /// Alcance deliberadamente angosto: NO es el `stop()` genérico. La
+    /// coordinación de pausa por dictado (`AppDelegate.dictationStateDidChange`,
+    /// hotkey ocupando el controller) y `cancelCapture()`/Esc siguen usando
+    /// `stop()`/`cancelCapture()` sin cambios — esos son "pausar" o
+    /// "cancelar", no "ya terminé de hablar", y no deben insertar texto que
+    /// el usuario no pidió pegar en ese momento.
+    public func stopAndFlush() {
+        queue.sync {
+            guard _state != .stopped else { return }
+            let flushed = segmenter.flush()
+            performStop()
+            if let flushed {
+                KikiLog.log("kiki wake: manos-libres detenido intencionalmente, volcando dictado en curso (\(flushed.count) muestras)")
+                // notifyCapture (sin fence de descarte) — mismo razonamiento
+                // que `handleSegmentEnded`: esto es habla real del usuario,
+                // debe entregarse siempre; el token de frescura de sesión
+                // deja que el delegate decida los efectos de ESTADO
+                // (rearmar el mic) sin perder el dictado.
+                notifyCapture { $0.wakeListenerDidCapture(samples: flushed, sessionIsCurrent: $1) }
+            } else {
+                KikiLog.log("kiki wake: manos-libres detenido intencionalmente (sin habla en curso que volcar)")
+            }
+        }
+    }
+
+    /// Teardown compartido por `stop()` y `stopAndFlush()`: apaga el tap y el
+    /// engine, cancela timeouts/transcripciones en vuelo, avanza `session`/
+    /// `notificationEpoch` (invalidando cualquier notificación de ESTADO ya
+    /// encolada — ver doc de `notificationEpoch`), preserva el piso de ruido
+    /// aprendido, y resetea el segmenter y el estado a `.stopped`.
+    /// `stopAndFlush()` llama a `segmenter.flush()` ANTES de este método —
+    /// `performStop()` no sabe ni le importa si hubo flush, solo hace la
+    /// limpieza incondicional que ambos caminos necesitan.
+    private func performStop() {
+        dispatchPrecondition(condition: .onQueue(queue))
+        engine.inputNode.removeTap(onBus: 0)
+        engine.stop()
+        cancelDisarmTimeout()
+        transcriptionTask?.cancel()
+        transcriptionTask = nil
+        isTranscribing = false
+        pendingSegment = nil
+        session += 1
+        // Ver doc de `notificationEpoch`: invalida cualquier notificación
+        // al delegate que ya haya sido despachada (Task@MainActor
+        // encolada) pero que todavía no haya corrido.
+        notificationEpoch += 1
+        flushPartialCalibrationWindow()
+        // Capturar el piso aprendido ANTES del reset() que lo borra de
+        // la instancia: el próximo start()/resumeArmed() lo re-siembra
+        // vía makeSegmenter (ver lastKnownNoiseFloor).
+        if let learned = segmenter.noiseFloor {
+            lastKnownNoiseFloor = learned
+        }
+        segmenter.reset()
+        _state = .stopped
     }
 
     /// Vuelca el pico de RMS acumulado en la ventana de calibración vigente

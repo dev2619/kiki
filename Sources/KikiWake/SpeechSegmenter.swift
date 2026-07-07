@@ -375,6 +375,47 @@ public final class SpeechSegmenter {
         effectiveThreshold = config.speechRMSThreshold
     }
 
+    /// Flush the in-progress speech segment (if any) and reset segmenter
+    /// state, WITHOUT waiting for silence. Used for an intentional
+    /// user-initiated stop (e.g. toggling hands-free off mid-utterance — see
+    /// `WakeListener.stopAndFlush()`) so audio already spoken is not
+    /// silently discarded just because end-of-speech was never detected.
+    /// This is the manual escape hatch for exactly the case relative-drop
+    /// end detection cannot always cover — see the HONEST LIMIT on
+    /// `endDropRatio`.
+    /// - Returns: pre-roll + accumulated speech samples (plus a capped
+    ///   trailing-silence tail, same allowance as a normal segment end) if a
+    ///   segment was in progress and had already reached `minSpeechDuration`;
+    ///   otherwise `nil` (nothing in progress, or too short to count as a
+    ///   real utterance). Either way, segment state is reset — the next
+    ///   `process()` call starts fresh from `.silence`.
+    public func flush() -> [Float]? {
+        guard case .speech = state else {
+            // Nothing "in progress" to flush: `.silence` has no accumulated
+            // speech, and `.awaitingSilence` holds an already-discarded
+            // ("máximo") segment, not one still in progress.
+            return nil
+        }
+
+        let speechDurationSeconds = Double(accumulatedSampleCount) / sampleRate
+        guard speechDurationSeconds >= config.minSpeechDuration else {
+            state = .silence
+            resetSegment()
+            return nil
+        }
+
+        var finalSamples = preRollBuffer
+        finalSamples.append(contentsOf: accumulatedSpeechSamples)
+        let tailToInclude = min(trailingTailMaxSize, trailingModeSilenceSamples.count)
+        if tailToInclude > 0 {
+            finalSamples.append(contentsOf: trailingModeSilenceSamples.prefix(tailToInclude))
+        }
+
+        state = .silence
+        resetSegment()
+        return finalSamples
+    }
+
     // MARK: - Helper: Adaptive noise floor
     /// Update the noise floor EMA and recompute `effectiveThreshold`.
     /// - Parameters:
