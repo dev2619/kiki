@@ -380,26 +380,35 @@ extension AppDelegate: WakeListenerDelegate {
         hud.show(state: .recording)
     }
 
-    func wakeListenerDidCapture(samples: [Float]) {
-        // Guarda contra la carrera stale que `WakeListener.notificationEpoch`
-        // ya NO cubre para capturas (ver doc ahí): una captura en vuelo puede
-        // llegar aquí justo cuando el hotkey ya tomó control (`.recording` o
-        // `.processing` por un dictado manual). En ese caso la muestra es
-        // basura vieja — descartarla explícitamente en vez de dejar que
+    func wakeListenerDidCapture(samples: [Float], sessionIsCurrent: Bool) {
+        // Guarda contra el ordenamiento donde otro dictado OCUPA el
+        // controller al llegar esta captura: hotkey ya grabando/procesando, o
+        // una segunda utterance manos-libres mientras la anterior todavía se
+        // procesa. Descartar explícitamente en vez de dejar que
         // `controller.process` la rechace por su cuenta, porque eso dejaría
         // `resumeAsArmed` pegado en `true` sin que nada lo limpie después.
         guard controller.state == .idle else {
-            KikiLog.log("kiki: captura descartada — dictado por tecla en curso")
+            KikiLog.log("kiki: captura descartada — controller en \(controller.state)")
             return
         }
-        // Marca la pausa que sigue (dictationStateDidChange) como originada
-        // por manos-libres: el resume debe usar resumeArmed(), no start(),
-        // para no perder la sesión continua ni pedir la frase de nuevo. Solo
-        // si el modo manos-libres sigue activo — si el usuario lo apagó
-        // mientras esta captura estaba en vuelo, el dictado se entrega igual
-        // (diseño: nunca se pierde habla ya capturada) pero no debe rearmar
-        // el mic tras procesar.
-        resumeAsArmed = wakeEnabled
+        // Traza de la carrera stale (dos capas de defensa, sin fence en
+        // WakeListener para capturas — el habla real nunca se descarta):
+        // 1) La captura stale llega mientras el hotkey aún ocupa
+        //    `.recording`/`.processing` → el guard de arriba la descarta y
+        //    ningún flag queda fijado.
+        // 2) La Task de captura venía starved en el MainActor y corre
+        //    DESPUÉS de que el ciclo de hotkey completo terminó (controller
+        //    de vuelta en `.idle`, `wakeEnabled` aún `true`) → el guard de
+        //    estado ya no la distingue de una captura fresca, pero
+        //    `sessionIsCurrent` llega en `false` (el stop() de ese ciclo
+        //    avanzó `session` en WakeListener) y evita fijar `resumeAsArmed`
+        //    — sin el token, el resume rearmaría el mic sin frase ni chime
+        //    (regresión de privacidad). El habla se procesa igual: la
+        //    frescura solo gatea el efecto de estado, nunca la entrega.
+        // Además gateado por `wakeEnabled`: si el usuario apagó el modo
+        // manos-libres mientras la captura estaba en vuelo, el dictado se
+        // entrega y pega igual, pero no debe rearmar el mic tras procesar.
+        resumeAsArmed = wakeEnabled && sessionIsCurrent
         // No hud.show(state: .idle) aquí: controller.process() dispara
         // dictationStateDidChange(.processing) casi de inmediato vía su
         // delegate, así que un orderOut(.idle) intermedio solo producía un
@@ -407,17 +416,18 @@ extension AppDelegate: WakeListenerDelegate {
         Task { await controller.process(samples: samples) }
     }
 
-    func wakeListenerDidCaptureSameBreath(text: String) {
+    func wakeListenerDidCaptureSameBreath(text: String, sessionIsCurrent: Bool) {
         // Mismo guard que wakeListenerDidCapture — ver comentario ahí.
         guard controller.state == .idle else {
-            KikiLog.log("kiki: captura descartada — dictado por tecla en curso")
+            KikiLog.log("kiki: captura descartada — controller en \(controller.state)")
             return
         }
         // Mismo razonamiento que wakeListenerDidCapture: el dictado en el
         // mismo aliento también abre/continúa una sesión continua — tras
         // procesarlo, el listener debe reanudar armado, no volver a
-        // listening plano. Gateado por `wakeEnabled` por la misma razón.
-        resumeAsArmed = wakeEnabled
+        // listening plano. Gateado por `wakeEnabled` y por el token de
+        // frescura por las mismas razones (ver traza de la carrera arriba).
+        resumeAsArmed = wakeEnabled && sessionIsCurrent
         Task { await controller.processTranscript(text) }
     }
 

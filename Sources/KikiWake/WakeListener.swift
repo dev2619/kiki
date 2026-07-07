@@ -10,9 +10,17 @@ public protocol WakeListenerDelegate: AnyObject {
     /// Empezó el dictado manos-libres (silencio→habla mientras está armado).
     func wakeListenerDidStartCapture()
     /// Dictado terminado (silencio sostenido mientras está armado).
-    func wakeListenerDidCapture(samples: [Float])
+    /// `sessionIsCurrent`: token de frescura — `false` si un `stop()` (o
+    /// `stop()`+`start()`/`resumeArmed()`) corrió entre el despacho de esta
+    /// notificación y su entrega en el MainActor. El delegate debe procesar
+    /// el habla capturada SIEMPRE (nunca se descarta dictado real), pero solo
+    /// debe tratar la entrega como parte de la sesión manos-libres vigente
+    /// (p.ej. rearmar el mic al terminar de procesar) cuando es `true` — ver
+    /// `WakeListener.notifyCapture`.
+    func wakeListenerDidCapture(samples: [Float], sessionIsCurrent: Bool)
     /// Frase + dictado en el mismo aliento ("escúchame kiki, escribe X").
-    func wakeListenerDidCaptureSameBreath(text: String)
+    /// `sessionIsCurrent`: mismo token de frescura que `wakeListenerDidCapture`.
+    func wakeListenerDidCaptureSameBreath(text: String, sessionIsCurrent: Bool)
     /// Se armó pero no hubo dictado dentro del timeout.
     func wakeListenerDidDisarm()
 }
@@ -151,13 +159,16 @@ public final class WakeListener: @unchecked Sendable {
     /// la cola del delegate (MainActor) antes de que `stop()` invalide la
     /// sesión no debe poder actuar después de ese `stop()`.
     ///
-    /// Alcance del fence (decisión de diseño, ver `notify(fenced:)`): solo
-    /// cubre `didArm`/`didStartCapture`/`didDisarm`. `didCapture`/
-    /// `didCaptureSameBreath` están EXENTAS (`fenced: false`) — cargan habla
-    /// real del usuario, que debe entregarse siempre aunque haya un `stop()`
-    /// concurrente. El fence protege únicamente notificaciones cuyo efecto es
-    /// visible/de estado (rearmar el mic, mostrar HUD), donde una entrega
-    /// stale sí sería un bug observable.
+    /// Alcance del fence (decisión de diseño): solo cubre
+    /// `didArm`/`didStartCapture`/`didDisarm` (vía `notify`). `didCapture`/
+    /// `didCaptureSameBreath` NO pasan por este fence — cargan habla real
+    /// del usuario, que debe entregarse siempre aunque haya un `stop()`
+    /// concurrente; van por `notifyCapture`, que en vez de descartar adjunta
+    /// un token de frescura de sesión (`sessionIsCurrent`, derivado de
+    /// `session`) para que el delegate gatee solo los efectos de estado. El
+    /// fence protege únicamente notificaciones cuyo efecto es visible/de
+    /// estado (rearmar el mic, mostrar HUD), donde una entrega stale sí
+    /// sería un bug observable.
     ///
     /// Carrera original que motivó este fence (antes de la exención de
     /// captura): un segmento armado termina y `handle()` ya corrió en
@@ -175,10 +186,13 @@ public final class WakeListener: @unchecked Sendable {
     /// pegado en `true` — al terminar el dictado por hotkey, el resume
     /// rearmaría el micrófono sin frase ni chime (regresión de privacidad).
     /// Ahora que la captura ya no pasa por el fence (debe entregarse
-    /// SIEMPRE — ver arriba), esa carrera se cierra del lado de
-    /// `AppDelegate` con un guard explícito sobre `controller.state == .idle`
-    /// en ambos manejadores de captura, que descarta la entrega stale por su
-    /// contenido (dictado por hotkey ya en curso) en vez de por el epoch.
+    /// SIEMPRE — ver arriba), esa carrera se cierra en dos capas: el guard
+    /// de `AppDelegate` sobre `controller.state == .idle` (cubre el
+    /// ordenamiento donde el hotkey aún ocupa `.recording`/`.processing`) y
+    /// el token `sessionIsCurrent` de `notifyCapture` (cubre el caso de una
+    /// Task starved que corre DESPUÉS de que el ciclo de hotkey terminó y el
+    /// controller volvió a `.idle` — el guard de estado ya no la detecta,
+    /// pero el token sí, porque `session` avanzó con el `stop()`).
     ///
     /// Para las notificaciones que sí quedan fenced, `notify` captura
     /// `notificationEpoch` en el momento del despacho (sobre `queue`) y la
@@ -460,17 +474,14 @@ public final class WakeListener: @unchecked Sendable {
             // `continuousSessionTimeout` (45s) vía `hasCapturedInSession`.
             hasCapturedInSession = true
             KikiLog.log("kiki wake: captura completa (\(samples.count) muestras), sesión continua sigue armada")
-            // fenced: false — decisión de diseño: una captura lleva habla
-            // real del usuario y debe entregarse SIEMPRE, aunque un stop()
-            // concurrente haya avanzado `notificationEpoch` antes de que esta
-            // Task corra en el MainActor. El fence protege notificaciones de
-            // ESTADO (armar/desarmar/empezar captura), donde una entrega
-            // stale causaría un efecto visible incorrecto (p.ej. rearmar el
-            // mic sin frase); perder un dictado ya capturado es peor que
-            // cualquier inconsistencia de estado que el fence evitaría aquí.
-            // La carrera original (hotkey pisando una captura en vuelo) ahora
-            // se cubre en `AppDelegate` con un guard sobre `controller.state`.
-            notify(fenced: false) { $0.wakeListenerDidCapture(samples: samples) }
+            // notifyCapture (sin fence de descarte) — decisión de diseño:
+            // una captura lleva habla real del usuario y debe entregarse
+            // SIEMPRE, aunque un stop() concurrente corra antes de que la
+            // Task llegue al MainActor. En vez del fence (que descartaría la
+            // entrega completa), viaja un token de frescura de sesión que el
+            // delegate usa para decidir los efectos de ESTADO (rearmar el
+            // mic) sin perder el dictado — ver doc de `notifyCapture`.
+            notifyCapture { $0.wakeListenerDidCapture(samples: samples, sessionIsCurrent: $1) }
             scheduleDisarmTimeout()
         case .stopped:
             break
@@ -541,11 +552,12 @@ public final class WakeListener: @unchecked Sendable {
         if match.remainder.isEmpty {
             arm()
         } else {
-            // fenced: false — mismo razonamiento que en handleSegmentEnded:
+            // notifyCapture — mismo razonamiento que en handleSegmentEnded:
             // el remainder es dictado real dicho en el mismo aliento que la
             // frase, no una notificación de estado. Debe entregarse aunque
-            // un stop() concurrente haya avanzado el epoch.
-            notify(fenced: false) { $0.wakeListenerDidCaptureSameBreath(text: match.remainder) }
+            // haya un stop() concurrente; el token de frescura le permite al
+            // delegate no rearmar el mic si la sesión ya no es la vigente.
+            notifyCapture { $0.wakeListenerDidCaptureSameBreath(text: match.remainder, sessionIsCurrent: $1) }
         }
     }
 
@@ -607,26 +619,15 @@ public final class WakeListener: @unchecked Sendable {
 
     // MARK: - Delegate hop
 
-    /// - Parameter fenced: `true` (default) aplica el fence de
-    ///   `notificationEpoch` — usado por las notificaciones de ESTADO
-    ///   (`didArm`/`didStartCapture`/`didDisarm`), donde una entrega stale
-    ///   tras un `stop()` concurrente produciría un efecto visible
-    ///   incorrecto. `false` la exime del fence — usado exclusivamente por
-    ///   `wakeListenerDidCapture`/`wakeListenerDidCaptureSameBreath`: esas
-    ///   notificaciones cargan habla real del usuario capturada mientras el
-    ///   listener estaba activo, y deben entregarse siempre aunque un
-    ///   `stop()` concurrente haya avanzado el epoch — perder un dictado ya
-    ///   grabado es peor que la inconsistencia de estado que el fence evita.
-    ///   Ver comentarios en los call sites de captura y el guard equivalente
-    ///   en `AppDelegate` (`controller.state == .idle`), que cubre la carrera
-    ///   original (hotkey pisando una captura en vuelo) sin depender del fence.
-    private func notify(fenced: Bool = true, _ action: @escaping @MainActor (WakeListenerDelegate) -> Void) {
+    /// Notificaciones de ESTADO (`didArm`/`didStartCapture`/`didDisarm`),
+    /// SIEMPRE fenced por `notificationEpoch`: una entrega stale tras un
+    /// `stop()` concurrente produciría un efecto visible incorrecto, así que
+    /// se descarta completa. Las notificaciones de CAPTURA no usan este
+    /// método — van por `notifyCapture`, que nunca descarta (cargan habla
+    /// real del usuario) y en su lugar adjunta un token de frescura.
+    private func notify(_ action: @escaping @MainActor (WakeListenerDelegate) -> Void) {
         dispatchPrecondition(condition: .onQueue(queue))
         guard let delegate else { return }
-        guard fenced else {
-            Task { @MainActor in action(delegate) }
-            return
-        }
         // Fence contra un `stop()` concurrente — ver doc de
         // `notificationEpoch` para la carrera exacta que esto cierra.
         let capturedEpoch = notificationEpoch
@@ -637,6 +638,35 @@ public final class WakeListener: @unchecked Sendable {
                 return
             }
             action(delegate)
+        }
+    }
+
+    /// Entrega de CAPTURA al delegate: nunca se descarta (el payload es habla
+    /// real del usuario, grabada mientras el listener estaba habilitado), pero
+    /// viaja acompañada de un token de frescura `sessionIsCurrent`.
+    ///
+    /// Por qué no basta con entregar sin fence y ya: una Task de captura
+    /// starved en el MainActor puede correr DESPUÉS de que un ciclo completo
+    /// de hotkey ajeno terminara (controller de vuelta en `.idle`,
+    /// `wakeEnabled` aún `true`) — en ese instante ningún guard de estado en
+    /// `AppDelegate` la distingue de una captura fresca, y fijaría
+    /// `resumeAsArmed = true` → rearme del mic sin frase ni chime (regresión
+    /// de privacidad). El token cierra ese agujero: `capturedSession` se
+    /// toma sobre `queue` en el momento del despacho, y la Task en MainActor
+    /// vuelve a leer `session` (`queue.sync`, deadlock-free por la misma
+    /// invariante del accessor `state`) justo antes de invocar al delegate.
+    /// `session` avanza en cada `stop()`/`start()`/`resumeArmed()`, así que
+    /// cualquier interrupción del listener entre despacho y entrega marca la
+    /// captura como stale. El delegate procesa el habla igual, pero solo
+    /// trata la entrega como parte de la sesión vigente (rearme) si
+    /// `sessionIsCurrent == true`.
+    private func notifyCapture(_ action: @escaping @MainActor (WakeListenerDelegate, _ sessionIsCurrent: Bool) -> Void) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        guard let delegate else { return }
+        let capturedSession = session
+        Task { @MainActor in
+            let sessionIsCurrent = self.queue.sync { capturedSession == self.session }
+            action(delegate, sessionIsCurrent)
         }
     }
 }
