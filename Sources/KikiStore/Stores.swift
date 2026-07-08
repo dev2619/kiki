@@ -92,7 +92,7 @@ public final class HistoryStore {
     private let directory: URL
     private let fileURL: URL
 
-    public let cap: Int
+    public private(set) var cap: Int
     public private(set) var entries: [HistoryEntry] = []
 
     public init(directory: URL, cap: Int = 200) {
@@ -114,6 +114,20 @@ public final class HistoryStore {
 
     public func clear() {
         entries.removeAll()
+        persist()
+    }
+
+    /// Cambia el cap en caliente (Ajustes → Historial, control de "cantidad a
+    /// conservar"). Si el nuevo cap es MENOR que el número de entradas
+    /// actuales, recorta de inmediato a las más recientes (mismo criterio
+    /// FIFO que `append`/`trimToCapIfNeeded`) y persiste el resultado. Si es
+    /// MAYOR, no hace nada más que levantar el techo — las entradas
+    /// existentes se conservan tal cual y el historial puede volver a crecer
+    /// hasta el nuevo límite con los próximos `append`.
+    public func setCap(_ newCap: Int) {
+        guard newCap > 0 else { return }
+        cap = newCap
+        trimToCapIfNeeded()
         persist()
     }
 

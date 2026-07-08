@@ -345,4 +345,63 @@ final class HistoryStoreTests: XCTestCase {
         let store = HistoryStore(directory: tempDir)
         XCTAssertEqual(store.entries, [])
     }
+
+    // MARK: - setCap (configurable history cap)
+
+    private func makeEntry(_ index: Int) -> HistoryEntry {
+        HistoryEntry(
+            date: Date().addingTimeInterval(Double(index)),
+            rawText: "raw\(index)",
+            finalText: "final\(index)",
+            profile: "default",
+            audioSeconds: Double(index)
+        )
+    }
+
+    func testSetCapTrimsExistingEntriesImmediately() {
+        let store = HistoryStore(directory: tempDir, cap: 200)
+        for i in 0..<300 {
+            store.append(makeEntry(i))
+        }
+        XCTAssertEqual(store.entries.count, 200)
+        XCTAssertEqual(store.entries.first?.rawText, "raw100")
+        XCTAssertEqual(store.entries.last?.rawText, "raw299")
+
+        store.setCap(50)
+        XCTAssertEqual(store.cap, 50)
+        XCTAssertEqual(store.entries.count, 50)
+        // Keeps the newest 50 out of the 200 that survived the initial cap.
+        XCTAssertEqual(store.entries.first?.rawText, "raw250")
+        XCTAssertEqual(store.entries.last?.rawText, "raw299")
+    }
+
+    func testSetCapToLargerValueKeepsExistingEntriesAndAllowsGrowth() {
+        let store = HistoryStore(directory: tempDir, cap: 200)
+        for i in 0..<200 {
+            store.append(makeEntry(i))
+        }
+
+        store.setCap(500)
+        XCTAssertEqual(store.cap, 500)
+        // Raising the cap must not force-fill or drop anything already there.
+        XCTAssertEqual(store.entries.count, 200)
+
+        for i in 200..<250 {
+            store.append(makeEntry(i))
+        }
+        XCTAssertEqual(store.entries.count, 250)
+    }
+
+    func testSetCapPersists() {
+        let store1 = HistoryStore(directory: tempDir, cap: 200)
+        for i in 0..<10 {
+            store1.append(makeEntry(i))
+        }
+        store1.setCap(5)
+
+        let store2 = HistoryStore(directory: tempDir, cap: 5)
+        XCTAssertEqual(store2.entries.count, 5)
+        XCTAssertEqual(store2.entries.first?.rawText, "raw5")
+        XCTAssertEqual(store2.entries.last?.rawText, "raw9")
+    }
 }

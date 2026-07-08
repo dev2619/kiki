@@ -145,6 +145,27 @@ final class SettingsViewModel: ObservableObject {
     /// `AppDelegate.effectiveAlwaysListening()` la lee fuera de MainActor.
     nonisolated static let alwaysListeningDefaultsKey = "kiki.alwaysListening"
 
+    /// Cap configurable del Historial (Ajustes → Historial, control
+    /// "cantidad a conservar"), default 200 — mismo default que
+    /// `HistoryStore.init(cap:)`. El `didSet` es la única fuente de escritura
+    /// a `UserDefaults` desde la UI Y quien empuja el nuevo valor a
+    /// `historyStore.setCap(_:)` para que el recorte (si el nuevo cap es
+    /// menor) sea inmediato, no solo tras el próximo `append`.
+    ///
+    /// `nonisolated` por la misma razón que `translateEnabledDefaultsKey`/
+    /// `alwaysListeningDefaultsKey`: `AppDelegate.effectiveHistoryCap()` lee
+    /// esta clave al construir `historyStore`, ANTES de que exista
+    /// `SettingsViewModel` (que sí es `@MainActor`).
+    nonisolated static let historyCapDefaultsKey = "kiki.historyCap"
+
+    @Published var historyCap: Int {
+        didSet {
+            UserDefaults.standard.set(historyCap, forKey: Self.historyCapDefaultsKey)
+            historyStore.setCap(historyCap)
+            refreshAll()
+        }
+    }
+
     /// Sección seleccionada del sidebar, persistida en `UserDefaults` y
     /// restaurada la próxima vez que se abre Ajustes (Fase 3.6, Task 2).
     @Published var selectedSection: SettingsSection {
@@ -190,6 +211,11 @@ final class SettingsViewModel: ObservableObject {
         self.alwaysListening = defaults.object(forKey: Self.alwaysListeningDefaultsKey) != nil
             ? defaults.bool(forKey: Self.alwaysListeningDefaultsKey)
             : true
+        // `integer(forKey:)` devuelve 0 cuando la clave está ausente — un cap
+        // de 0 no tiene sentido, así que se trata como "sin configurar" y cae
+        // al default 200 (mismo default que `HistoryStore.init(cap:)`).
+        let storedHistoryCap = defaults.integer(forKey: Self.historyCapDefaultsKey)
+        self.historyCap = storedHistoryCap > 0 ? storedHistoryCap : 200
         if let rawSection = defaults.string(forKey: Self.settingsSectionKey),
            let restored = SettingsSection(rawValue: rawSection) {
             self.selectedSection = restored
@@ -271,8 +297,22 @@ final class SettingsViewModel: ObservableObject {
 
     // MARK: - Historial
 
+    /// Texto del campo de búsqueda de Historial. El filtrado en sí es puro y
+    /// vive en `HistorySearch` (KikiStore, testeado sin SwiftUI/AppKit);
+    /// este `@Published` solo dispara el recómputo de `filteredHistoryEntries`
+    /// vía SwiftUI.
+    @Published var historySearchQuery = ""
+
+    /// Vista filtrada de `historyEntries` (ya en orden "más reciente
+    /// primero") sobre la que la sección Historial debe iterar en vez de
+    /// `historyEntries` directamente. Query vacía → todas las entradas.
+    var filteredHistoryEntries: [HistoryEntry] {
+        HistorySearch.filter(historyEntries, query: historySearchQuery)
+    }
+
     func clearHistory() {
         historyStore.clear()
+        historySearchQuery = ""
         refreshAll()
     }
 

@@ -364,6 +364,14 @@ private struct HistorySectionView: View {
     @ObservedObject var viewModel: SettingsViewModel
     @State private var confirmingClear = false
 
+    /// Opciones fijas del Picker de cap — el mismo set que el owner pidió
+    /// ("sensible options"). `historyCap` puede en teoría contener otro valor
+    /// (p. ej. si un usuario editó `UserDefaults` a mano), en cuyo caso el
+    /// Picker simplemente no marca ningún tag como seleccionado hasta que el
+    /// usuario elige una opción de la lista — no hace falta normalizar ese
+    /// caso raro aquí.
+    private static let capOptions = [50, 100, 200, 500, 1000]
+
     private static let relativeFormatter: RelativeDateTimeFormatter = {
         let formatter = RelativeDateTimeFormatter()
         formatter.unitsStyle = .full
@@ -373,6 +381,11 @@ private struct HistorySectionView: View {
     var body: some View {
         Form {
             Section {
+                TextField("Buscar en el historial", text: $viewModel.historySearchQuery)
+                    .textFieldStyle(.roundedBorder)
+            }
+
+            Section {
                 if viewModel.historyEntries.isEmpty {
                     ContentUnavailableView(
                         "Sin dictados registrados",
@@ -380,11 +393,18 @@ private struct HistorySectionView: View {
                         description: Text("Tus dictados aparecerán aquí a medida que uses kiki.")
                     )
                     .frame(maxWidth: .infinity)
+                } else if viewModel.filteredHistoryEntries.isEmpty {
+                    ContentUnavailableView(
+                        "Sin resultados para \"\(viewModel.historySearchQuery)\"",
+                        systemImage: "magnifyingglass",
+                        description: Text("Prueba con otro término de búsqueda.")
+                    )
+                    .frame(maxWidth: .infinity)
                 } else {
                     // Identidad estable por fecha: con el refresco en vivo, un
                     // id posicional haría saltar el estado expandido de fila
                     // cuando entra un dictado nuevo.
-                    ForEach(viewModel.historyEntries, id: \.date) { entry in
+                    ForEach(viewModel.filteredHistoryEntries, id: \.date) { entry in
                         HistoryRow(
                             entry: entry,
                             relativeFormatter: Self.relativeFormatter,
@@ -395,6 +415,17 @@ private struct HistorySectionView: View {
                 Text("Historial de dictados")
             } footer: {
                 Text("kiki guarda tus últimos dictados localmente para que puedas revisarlos o copiarlos de nuevo.")
+            }
+
+            Section {
+                Picker("Cantidad a conservar", selection: $viewModel.historyCap) {
+                    ForEach(Self.capOptions, id: \.self) { option in
+                        Text("\(option)").tag(option)
+                    }
+                }
+                .pickerStyle(.menu)
+            } footer: {
+                Text("kiki guarda las últimas \(viewModel.historyCap) dictadas; las más antiguas se descartan.")
             }
 
             if !viewModel.historyEntries.isEmpty {

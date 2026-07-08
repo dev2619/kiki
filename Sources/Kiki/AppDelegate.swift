@@ -42,6 +42,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             : true
     }
 
+    /// Lee `kiki.historyCap` de `UserDefaults` para construir `historyStore`
+    /// con el cap persistido por el usuario (control "cantidad a conservar"
+    /// en Ajustes → Historial) en vez del default fijo de `HistoryStore`.
+    /// Mismo patrón "ausente vs. inválido" que `effectiveWakeRMSThreshold()`:
+    /// `integer(forKey:)` no distingue "clave ausente" de "0", así que se
+    /// exige > 0 explícitamente antes de confiar en el valor guardado.
+    private static func effectiveHistoryCap() -> Int {
+        let stored = UserDefaults.standard.integer(forKey: SettingsViewModel.historyCapDefaultsKey)
+        return stored > 0 ? stored : 200
+    }
+
     /// `Application Support/kiki`, ubicación real de los stores de
     /// personalización (Fase 3, Task 4) — separada de cualquier directorio
     /// temporal usado en tests.
@@ -89,7 +100,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // fuerte que los mantiene vivos.
     let dictionaryStore = DictionaryStore(directory: AppDelegate.personalizationDirectory)
     let snippetStore = SnippetStore(directory: AppDelegate.personalizationDirectory)
-    let historyStore = HistoryStore(directory: AppDelegate.personalizationDirectory)
+    let historyStore = HistoryStore(
+        directory: AppDelegate.personalizationDirectory,
+        cap: AppDelegate.effectiveHistoryCap())
     private lazy var dictionaryAdapter = DictionaryAdapter(store: dictionaryStore)
     private lazy var snippetAdapter = SnippetAdapter(store: snippetStore)
     private lazy var historyAdapter = HistoryAdapter(store: historyStore)
