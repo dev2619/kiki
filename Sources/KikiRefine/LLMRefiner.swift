@@ -93,10 +93,29 @@ public final class LLMRefiner: Refining {
     }
 
     /// Carga (y si hace falta descarga) el modelo. Llamar una vez al arrancar.
-    public func prepare() async throws {
+    ///
+    /// - Parameter progressHandler: reporta progreso 0...1 de la descarga
+    ///   desde Hugging Face. API real verificada en el checkout de
+    ///   `mlx-swift-examples`: `ModelFactory.loadContainer(hub:configuration:progressHandler:)`
+    ///   (`Libraries/MLXLMCommon/ModelFactory.swift`) ya acepta un
+    ///   `@Sendable (Progress) -> Void` — a diferencia de WhisperKit, no hizo
+    ///   falta ningún rodeo de dos pasos, solo pasar el parámetro que la
+    ///   llamada anterior ignoraba. El progreso solo cubre la descarga
+    ///   (`downloadModel` dentro de `LLMModelFactory._load`, ver
+    ///   `Libraries/MLXLLM/LLMModelFactory.swift:455-461`); la carga de pesos
+    ///   safetensors→MLX que sigue no reporta progreso adicional, por eso se
+    ///   fuerza `progressHandler?(1.0)` al terminar (mismo patrón que el
+    ///   fallback de `WhisperTranscriber.prepare`). Puede dispararse desde
+    ///   cualquier hilo — el llamador salta a MainActor antes de tocar UI.
+    public func prepare(progressHandler: (@Sendable (Double) -> Void)? = nil) async throws {
         let started = Date()
         let configuration = ModelConfiguration(id: Self.preferredModel)
-        modelContainer = try await LLMModelFactory.shared.loadContainer(configuration: configuration)
+        modelContainer = try await LLMModelFactory.shared.loadContainer(
+            configuration: configuration,
+            progressHandler: { progress in
+                progressHandler?(progress.fractionCompleted)
+            })
+        progressHandler?(1.0)
         isReady = true
 
         // Límite de cache de buffers de MLX: se fija una sola vez al cargar el

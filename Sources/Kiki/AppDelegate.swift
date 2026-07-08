@@ -108,6 +108,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private lazy var historyAdapter = HistoryAdapter(store: historyStore)
     private var settingsViewModel: SettingsViewModel!
     private var settingsWindowController: SettingsWindowController!
+    /// Ventana "Preparando kiki…" (progreso de descarga+carga de modelos del
+    /// primer arranque, ver `ModelLoadProgressWindow.swift`). Creada e
+    /// inmediatamente mostrada al inicio de `loadModelInBackground` — NO es
+    /// un singleton reabrible como `settingsWindowController`, se destruye
+    /// (`dismiss()`) apenas los modelos terminan de cargar.
+    private var modelLoadProgressWindowController: ModelLoadProgressWindowController!
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         Permissions.requestMicrophoneAccess()
@@ -526,7 +532,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    private func loadModelInBackground() {
+    private static let sttPhaseLabel = "Descargando modelo de voz…"
+    private static let llmPhaseLabel = "Descargando modelo de IA…"
+
+    /// Muestra la ventana "Preparando kiki…" INCONDICIONALMENTE al arrancar
+    /// — no solo cuando hay una descarga real de 2.7GB de por medio. En un
+    /// arranque en caliente (modelos ya cacheados) `prepare()` igual tarda
+    /// unos segundos por el prewarm/load de CoreML y la carga de pesos MLX,
+    /// así que la ventana queda en pantalla ese rato corto y se autodescarta
+    /// en `markReady()` — informativo y nunca un flash roto a medio pintar,
+    /// más simple que un guard por tiempo transcurrido (ver spec de la
+    /// feature: "simplest robust approach").
+    @MainActor private func loadModelInBackground() {
+        modelLoadProgressWindowController = ModelLoadProgressWindowController()
+        modelLoadProgressWindowController.show()
+        updateLoadProgress(phase1: 0, phase2: 0, phaseLabel: Self.sttPhaseLabel)
+
         // Un solo Task (hereda MainActor) para que la carga de Whisper y la
         // del LLM queden serializadas — evita llamadas concurrentes a
         // prepare() en ambos modelos.
@@ -540,17 +561,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.refiner.setDictionaryProvider(self.dictionaryAdapter)
 
             do {
-                try await self.transcriber.prepare()
+                // El callback de progreso de WhisperKit (descarga HF +
+                // transiciones de `modelStateCallback` para prewarm/load,
+                // ver `WhisperTranscriber.loadPreferredModel`) puede
+                // dispararse desde cualquier hilo — se salta a MainActor
+                // aquí antes de tocar la ventana/el menú.
+                try await self.transcriber.prepare(progressHandler: { [weak self] fraction in
+                    Task { @MainActor in
+                        self?.updateLoadProgress(phase1: fraction, phase2: 0, phaseLabel: Self.sttPhaseLabel)
+                    }
+                })
             } catch {
                 KikiLog.log("kiki: error cargando modelo de transcripción: \(error)")
                 await MainActor.run {
                     self.statusItem.menu?.item(withTag: 1)?.title = "Error cargando modelo"
+                    self.modelLoadProgressWindowController.dismiss()
                 }
                 return
             }
 
             do {
-                try await self.refiner.prepare()
+                // Fase 1 (Whisper) ya está completa en este punto — se fija
+                // en 1.0 para que la barra no retroceda al arrancar la fase 2.
+                try await self.refiner.prepare(progressHandler: { [weak self] fraction in
+                    Task { @MainActor in
+                        self?.updateLoadProgress(phase1: 1, phase2: fraction, phaseLabel: Self.llmPhaseLabel)
+                    }
+                })
                 await MainActor.run { self.markReady() }
             } catch {
                 KikiLog.log("kiki: error cargando modelo de refinado LLM: \(error)")
@@ -559,7 +596,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// Combina el progreso de ambas fases (`ModelLoadProgress.overall`, Whisper
+    /// peso 0.4 / Qwen peso 0.6 — ver doc del tipo) y refleja el total en la
+    /// ventana de carga Y en el ítem de menú "Descargando modelos… X%" como
+    /// indicador secundario liviano (visible sin abrir/enfocar la ventana).
+    @MainActor private func updateLoadProgress(phase1: Double, phase2: Double, phaseLabel: String) {
+        let overall = ModelLoadProgress.overall(phase1: phase1, phase2: phase2)
+        modelLoadProgressWindowController.update(phaseLabel: phaseLabel, fraction: overall)
+        let percent = Int((overall * 100).rounded())
+        statusItem.menu?.item(withTag: 1)?.title = "Descargando modelos… \(percent)%"
+    }
+
     @MainActor private func markReady(refinementAvailable: Bool = true) {
+        modelLoadProgressWindowController.dismiss()
         statusItem.button?.appearsDisabled = false
         statusItem.menu?.item(withTag: 1)?.title = refinementAvailable
             ? "Listo — mantén Fn para dictar"
