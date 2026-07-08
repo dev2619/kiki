@@ -230,7 +230,9 @@ final class DictationControllerTests: XCTestCase {
 
     func test_refinerOutputIsInserted() async {
         let refiner = MockRefiner()
-        refiner.textToReturn = "texto pulido."
+        // Salida fiel (misma vocabulario, solo puntuación/mayúscula) — no debe
+        // disparar la guardia de fidelidad de RefineFidelity.
+        refiner.textToReturn = "Hello world."
         let context = MockContext()
         controller = DictationController(
             recorder: recorder, transcriber: transcriber, inserter: inserter,
@@ -241,7 +243,7 @@ final class DictationControllerTests: XCTestCase {
         controller.hotkeyPressed()
         await controller.hotkeyReleased()
 
-        XCTAssertEqual(inserter.inserted, ["texto pulido."])
+        XCTAssertEqual(inserter.inserted, ["Hello world."])
     }
 
     func test_refinerReceivesProfileFromContext() async {
@@ -411,7 +413,7 @@ final class DictationControllerTests: XCTestCase {
 
     func test_processTranscriptRefinesAndInserts() async {
         let refiner = MockRefiner()
-        refiner.textToReturn = "texto pulido."
+        refiner.textToReturn = "Hello world."
         let context = MockContext()
         controller = DictationController(
             recorder: recorder, transcriber: transcriber, inserter: inserter,
@@ -420,7 +422,7 @@ final class DictationControllerTests: XCTestCase {
 
         await controller.processTranscript("hello world")
 
-        XCTAssertEqual(inserter.inserted, ["texto pulido."])
+        XCTAssertEqual(inserter.inserted, ["Hello world."])
         XCTAssertEqual(refiner.receivedTexts, ["hello world"])
         XCTAssertTrue(delegate.states.contains(.processing))
         XCTAssertEqual(controller.state, .idle)
@@ -512,7 +514,7 @@ final class DictationControllerTests: XCTestCase {
 
     func test_snippetMissFollowsNormalFlow() async {
         let refiner = MockRefiner()
-        refiner.textToReturn = "refined output"
+        refiner.textToReturn = "World."
         let snippets = MockSnippets()
         snippets.matchesToReturn = ["hello": "template"] // no match for "world"
         let context = MockContext()
@@ -528,7 +530,7 @@ final class DictationControllerTests: XCTestCase {
         await controller.hotkeyReleased()
 
         // Should follow normal refined flow
-        XCTAssertEqual(inserter.inserted, ["refined output"])
+        XCTAssertEqual(inserter.inserted, ["World."])
         // Refiner should have been called
         XCTAssertEqual(refiner.receivedTexts, ["world"])
         // Snippet expansion should have been called
@@ -611,7 +613,7 @@ final class DictationControllerTests: XCTestCase {
 
     func test_nilSnippetsAndHistoryPreservePhase2Behavior() async {
         let refiner = MockRefiner()
-        refiner.textToReturn = "refined"
+        refiner.textToReturn = "Test."
         let context = MockContext()
 
         // Explicitly nil (no snippets, no history)
@@ -625,7 +627,7 @@ final class DictationControllerTests: XCTestCase {
         controller.hotkeyPressed()
         await controller.hotkeyReleased()
 
-        XCTAssertEqual(inserter.inserted, ["refined"])
+        XCTAssertEqual(inserter.inserted, ["Test."])
         XCTAssertEqual(controller.state, .idle)
     }
 
@@ -709,20 +711,86 @@ final class DictationControllerTests: XCTestCase {
 
     func test_boundaryLengthTextInvokesRefiner() async {
         let refiner = MockRefiner()
-        refiner.textToReturn = "refined boundary text"
+        let boundaryText = String(repeating: "a", count: 25) // == minRefinableLength
+        // Salida fiel (mismo token, solo un punto añadido) — no dispara la
+        // guardia de fidelidad de RefineFidelity.
+        let refinedBoundary = boundaryText + "."
+        refiner.textToReturn = refinedBoundary
         let context = MockContext()
         controller = DictationController(
             recorder: recorder, transcriber: transcriber, inserter: inserter,
             refiner: refiner, context: context)
         controller.delegate = delegate
 
-        let boundaryText = String(repeating: "a", count: 25) // == minRefinableLength
         transcriber.textToReturn = boundaryText
         controller.hotkeyPressed()
         await controller.hotkeyReleased()
 
         XCTAssertEqual(refiner.receivedTexts, [boundaryText], "Refiner must be invoked at exactly minRefinableLength")
-        XCTAssertEqual(inserter.inserted, ["refined boundary text"])
+        XCTAssertEqual(inserter.inserted, [refinedBoundary])
+    }
+
+    // MARK: - Fidelity fallback (bugfix 2026-07-08)
+    //
+    // Bug de campo: "Dame la lista de repositorios ya automatizados" salió como
+    // "Lista de repositorios automatizados:" — el refinador parafraseó. La
+    // guardia de fidelidad detecta cuando el refinado introduce vocabulario
+    // nuevo (respondió/reformuló en vez de limpiar) y cae al texto crudo.
+
+    func test_paraphraseWithNewVocabularyFallsBackToRaw() async {
+        let refiner = MockRefiner()
+        // Respuesta con vocabulario totalmente ajeno al dictado (modo de fallo
+        // dañino): el usuario dictó una orden, el modelo "respondió".
+        refiner.textToReturn = "Son las tres de la tarde en punto."
+        let context = MockContext()
+        controller = DictationController(
+            recorder: recorder, transcriber: transcriber, inserter: inserter,
+            refiner: refiner, context: context, minRefinableLength: 0)
+        controller.delegate = delegate
+
+        let raw = "dame la lista de repositorios automatizados"
+        transcriber.textToReturn = raw
+        controller.hotkeyPressed()
+        await controller.hotkeyReleased()
+
+        XCTAssertEqual(refiner.receivedTexts, [raw], "Refiner is still invoked")
+        XCTAssertEqual(inserter.inserted, [raw], "Unfaithful refinement must fall back to the raw transcription")
+    }
+
+    func test_refineDisabledInsertsRawTranscription() async {
+        let refiner = MockRefiner()
+        refiner.textToReturn = "Hello world."
+        let context = MockContext()
+        controller = DictationController(
+            recorder: recorder, transcriber: transcriber, inserter: inserter,
+            refiner: refiner, context: context, minRefinableLength: 0,
+            refineEnabled: { false })
+        controller.delegate = delegate
+
+        transcriber.textToReturn = "hello world"
+        controller.hotkeyPressed()
+        await controller.hotkeyReleased()
+
+        XCTAssertTrue(refiner.receivedTexts.isEmpty, "Refiner must not be called when refinement is disabled")
+        XCTAssertEqual(inserter.inserted, ["hello world"], "Disabled refinement inserts the raw transcription verbatim")
+    }
+
+    func test_refineDisabledStillTranslatesWhenTranslateOn() async {
+        let refiner = MockRefiner()
+        refiner.textToReturn = "Hello world."
+        let context = MockContext()
+        controller = DictationController(
+            recorder: recorder, transcriber: transcriber, inserter: inserter,
+            refiner: refiner, context: context, minRefinableLength: 0,
+            translateEnabled: { true }, refineEnabled: { false })
+        controller.delegate = delegate
+
+        transcriber.textToReturn = "hola mundo"
+        controller.hotkeyPressed()
+        await controller.hotkeyReleased()
+
+        XCTAssertEqual(refiner.receivedTexts, ["hola mundo"], "Translate mode runs even with refinement disabled")
+        XCTAssertEqual(inserter.inserted, ["Hello world."], "Translation output is inserted")
     }
 
     // MARK: - Language Threading (fidelity fix: field bug — Whisper detects
