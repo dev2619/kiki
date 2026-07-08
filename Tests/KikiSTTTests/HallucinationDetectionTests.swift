@@ -217,4 +217,181 @@ final class HallucinationDetectionTests: XCTestCase {
             )
         )
     }
+
+    // MARK: - Denylist confidence gate (the false-positive fix)
+    //
+    // A REAL, confidently-spoken short utterance that happens to be a
+    // denylisted phrase must NOT be dropped. The denylist may only fire when
+    // confidence is AMBIGUOUS, never on clearly-real speech.
+
+    func testDenylistPhrase_HighConfidence_ShortAudio_IsNotRejected() {
+        // Real "gracias"/"you"/"subscribe" said clearly: low noSpeechProb AND
+        // high avgLogProb. Must survive despite short text + short audio.
+        for phrase in ["gracias", "you", "subscribe", "thank you"] {
+            XCTAssertFalse(
+                WhisperTranscriber.isLikelyHallucination(
+                    text: phrase,
+                    noSpeechProb: 0.05,
+                    avgLogProb: -0.2,
+                    audioSeconds: 1.0
+                ),
+                "confidently-spoken '\(phrase)' must NOT be rejected")
+        }
+    }
+
+    func testDenylistPhrase_BorderlineConfidence_ShortAudio_IsRejected() {
+        // Same phrases at ambiguous confidence → hallucination → rejected.
+        for phrase in ["gracias", "you", "subscribe", "thank you"] {
+            XCTAssertTrue(
+                WhisperTranscriber.isLikelyHallucination(
+                    text: phrase,
+                    noSpeechProb: 0.35,
+                    avgLogProb: -0.5,
+                    audioSeconds: 1.0
+                ),
+                "borderline-confidence '\(phrase)' must be rejected")
+        }
+    }
+
+    func testDenylist_AmbiguousViaNoSpeechFloorOnly_IsRejected() {
+        // noSpeechProb crosses the floor, logProb is fine → still ambiguous.
+        XCTAssertTrue(
+            WhisperTranscriber.isLikelyHallucination(
+                text: "gracias",
+                noSpeechProb: WhisperTranscriber.denylistNoSpeechFloor,
+                avgLogProb: 0.0,
+                audioSeconds: 1.0
+            )
+        )
+    }
+
+    func testDenylist_AmbiguousViaLogProbCeilingOnly_IsRejected() {
+        // logProb crosses the ceiling, noSpeechProb is fine → still ambiguous.
+        XCTAssertTrue(
+            WhisperTranscriber.isLikelyHallucination(
+                text: "gracias",
+                noSpeechProb: 0.0,
+                avgLogProb: WhisperTranscriber.denylistLogProbCeiling,
+                audioSeconds: 1.0
+            )
+        )
+    }
+
+    func testDenylist_JustInsideConfidentZone_IsNotRejected() {
+        // noSpeechProb just below floor AND logProb just above ceiling →
+        // clearly-confident → denylist must not fire.
+        XCTAssertFalse(
+            WhisperTranscriber.isLikelyHallucination(
+                text: "gracias",
+                noSpeechProb: WhisperTranscriber.denylistNoSpeechFloor - 0.01,
+                avgLogProb: WhisperTranscriber.denylistLogProbCeiling + 0.01,
+                audioSeconds: 1.0
+            )
+        )
+    }
+
+    // MARK: - Text-length boundary
+
+    func testTextLength_ExactlyAtThreshold_DenylistCanApply() {
+        // Build a denylisted phrase whose normalized length == threshold.
+        // "thanks for watching" is 19 chars (<= 20). Verify it still matches.
+        let phrase = "thanks for watching"
+        XCTAssertLessThanOrEqual(phrase.count, WhisperTranscriber.hallucinationTextLengthThreshold)
+        XCTAssertTrue(
+            WhisperTranscriber.isLikelyHallucination(
+                text: phrase,
+                noSpeechProb: 0.4,
+                avgLogProb: -0.5,
+                audioSeconds: 1.0
+            )
+        )
+    }
+
+    func testTextLength_JustAboveThreshold_DenylistDoesNotApply() {
+        // 21-char string (not denylisted anyway) must not be rejected via
+        // denylist; and confidence here is ambiguous but sub-primary-gate.
+        let text = String(repeating: "a", count: 21)
+        XCTAssertGreaterThan(text.count, WhisperTranscriber.hallucinationTextLengthThreshold)
+        XCTAssertFalse(
+            WhisperTranscriber.isLikelyHallucination(
+                text: text,
+                noSpeechProb: 0.4,
+                avgLogProb: -0.5,
+                audioSeconds: 1.0
+            )
+        )
+    }
+
+    func testNormalization_TrailingSpaceAfterPunctuation() {
+        // "Gracias. " → trim ws → "Gracias." → strip punct → "gracias." ...
+        // the dangling case: whitespace both before AND after punctuation is
+        // stripped so the result matches the denylist exactly.
+        for raw in ["Gracias. ", " Gracias. ", "gracias.", "thank you. "] {
+            XCTAssertTrue(
+                WhisperTranscriber.isLikelyHallucination(
+                    text: raw,
+                    noSpeechProb: 0.4,
+                    avgLogProb: -0.5,
+                    audioSeconds: 1.0
+                ),
+                "normalized '\(raw)' should match denylist")
+        }
+    }
+
+    // MARK: - Multi-segment confidence aggregation
+
+    func testAggregate_EmptySegments_ReturnsZeros() {
+        let (noSpeech, logProb) = WhisperTranscriber.aggregateConfidence(
+            noSpeechProbs: [], avgLogProbs: [])
+        XCTAssertEqual(noSpeech, 0)
+        XCTAssertEqual(logProb, 0)
+    }
+
+    func testAggregate_SingleSegment_ReturnsItsValues() {
+        let (noSpeech, logProb) = WhisperTranscriber.aggregateConfidence(
+            noSpeechProbs: [0.8], avgLogProbs: [-1.2])
+        XCTAssertEqual(noSpeech, 0.8)
+        XCTAssertEqual(logProb, -1.2)
+    }
+
+    func testAggregate_TakesMinNoSpeechAndMaxLogProb() {
+        let (noSpeech, logProb) = WhisperTranscriber.aggregateConfidence(
+            noSpeechProbs: [1.0, 0.3, 0.7], avgLogProbs: [-2.0, -0.3, -1.1])
+        XCTAssertEqual(noSpeech, 0.3)
+        XCTAssertEqual(logProb, -0.3)
+    }
+
+    func testAggregate_RealMultiSegmentDictationWithPause_Survives() {
+        // Real 2-segment dictation: one speech segment (noSpeech 0.3, logProb
+        // -0.3) + one silent-pause segment (noSpeech 1.0, logProb -2.5). A
+        // naive average would be noSpeech 0.65 (> 0.6) → wrongly rejected.
+        // min/max aggregation keeps the speech segment's confidence.
+        let (noSpeech, logProb) = WhisperTranscriber.aggregateConfidence(
+            noSpeechProbs: [0.3, 1.0], avgLogProbs: [-0.3, -2.5])
+        XCTAssertEqual(noSpeech, 0.3)
+        XCTAssertEqual(logProb, -0.3)
+        XCTAssertFalse(
+            WhisperTranscriber.isLikelyHallucination(
+                text: "hola quiero que me ayudes con esto",
+                noSpeechProb: noSpeech,
+                avgLogProb: logProb,
+                audioSeconds: 6.0
+            ),
+            "real multi-segment dictation with a pause must survive")
+    }
+
+    func testAggregate_AllSilentSegments_StillRejected() {
+        // Field bug: two silence segments, both high noSpeech. Even the min
+        // stays above the primary threshold → rejected.
+        let (noSpeech, logProb) = WhisperTranscriber.aggregateConfidence(
+            noSpeechProbs: [0.85, 0.9], avgLogProbs: [-0.3, -0.4])
+        XCTAssertEqual(noSpeech, 0.85)
+        XCTAssertTrue(
+            WhisperTranscriber.isLikelyHallucination(
+                text: "Thank you.",
+                noSpeechProb: noSpeech,
+                avgLogProb: logProb,
+                audioSeconds: 1.2
+            ))
+    }
 }

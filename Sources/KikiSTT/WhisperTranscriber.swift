@@ -90,12 +90,35 @@ public actor WhisperTranscriber: Transcribing, LanguageDetecting {
     /// substring incidental.
     static let hallucinationTextLengthThreshold: Int = 20
 
+    /// Piso de `noSpeechProb` para que la denylist siquiera se consulte. La
+    /// gate primaria (`noSpeechProbThreshold`, -1.0) descarta cuando la
+    /// confianza es CLARAMENTE mala; la denylist es la zona GRIS entre "buena"
+    /// y "mala". Sin este piso, la denylist descartaba habla real corta y
+    /// confiada ("gracias"/"you"/"subscribe" a noSpeech 0.1, logProb -0.3, 1s)
+    /// solo por ser corta — el mismísimo falso positivo que el fix debía
+    /// evitar. 0.3 deja pasar intacto cualquier segmento con confianza clara
+    /// de habla y solo abre la denylist cuando el modelo ya duda algo.
+    static let denylistNoSpeechFloor: Float = 0.3
+
+    /// Techo de `avgLogProb` (condición OR con `denylistNoSpeechFloor`) para
+    /// abrir la denylist: log-prob por debajo de -0.4 indica que el modelo no
+    /// está seguro del texto aunque el `noSpeechProb` sea bajo. Habla clara y
+    /// confiada tiene avgLogProb por encima de este valor y nunca toca la
+    /// denylist.
+    static let denylistLogProbCeiling: Float = -0.4
+
     /// Frases clásicas que Whisper "alucina" sobre silencio o ruido
     /// ambiente — heredadas de subtítulos de YouTube en su dataset de
     /// entrenamiento (bug público y ampliamente documentado de Whisper).
-    /// Defensa de última línea (denylist): solo se consulta cuando la gate
-    /// de confianza no disparó Y tanto el audio como el texto son cortos —
-    /// así un "gracias" real dentro de un dictado largo nunca se descarta.
+    /// Defensa de última línea (denylist): solo se consulta cuando (a) la gate
+    /// de confianza primaria no disparó, (b) audio y texto son cortos, Y
+    /// (c) la confianza es AMBIGUA — no claramente habla real
+    /// (`noSpeechProb >= denylistNoSpeechFloor` OR
+    /// `avgLogProb <= denylistLogProbCeiling`). La condición (c) es la que
+    /// evita descartar un "gracias"/"you"/"subscribe" dicho de verdad, corto
+    /// y con confianza alta: sin ella la denylist se dispararía solo por
+    /// longitud+duración. Así un "gracias" real (dentro de un dictado largo,
+    /// o corto pero confiado) nunca se descarta.
     /// NOTA: "subtítulos realizados por la comunidad de amara.org" excede
     /// `hallucinationTextLengthThreshold`; para ese caso concreto la
     /// detección recae en la gate de confianza, no en esta lista.
@@ -111,7 +134,8 @@ public actor WhisperTranscriber: Transcribing, LanguageDetecting {
     /// Función pura: decide si una transcripción es probablemente una
     /// alucinación de silencio/ruido de Whisper. Combina la gate de
     /// confianza (primaria: `noSpeechProb`/`avgLogProb`) con la denylist de
-    /// frases conocidas (secundaria: solo aplica con audio+texto cortos).
+    /// frases conocidas (secundaria: solo aplica con audio+texto cortos Y
+    /// confianza ambigua — ver `knownHallucinationPhrases`).
     /// Extraída como función pura (sin `self`, sin WhisperKit) para poder
     /// testear la lógica de umbrales de forma determinista.
     static func isLikelyHallucination(
@@ -120,22 +144,64 @@ public actor WhisperTranscriber: Transcribing, LanguageDetecting {
         avgLogProb: Float,
         audioSeconds: Double
     ) -> Bool {
+        // Gate primaria: confianza claramente mala → descarta sin más.
         if noSpeechProb >= noSpeechProbThreshold || avgLogProb <= avgLogProbThreshold {
             return true
         }
 
+        // Denylist (secundaria): solo si audio y texto son cortos.
+        guard audioSeconds <= hallucinationAudioSecondsThreshold else {
+            return false
+        }
+
+        // Y solo si la confianza es AMBIGUA. Habla corta pero claramente
+        // confiada (noSpeech bajo Y logProb alto) NUNCA toca la denylist.
+        let confidenceAmbiguous =
+            noSpeechProb >= denylistNoSpeechFloor || avgLogProb <= denylistLogProbCeiling
+        guard confidenceAmbiguous else {
+            return false
+        }
+
+        // Normaliza a lowercase y quita puntuación + espacios de los bordes.
+        // Se recorta espacio ANTES y DESPUÉS de la puntuación: "Gracias. "
+        // → quita el espacio final → quita el "." → queda "gracias" (sin el
+        // orden doble, un espacio tras la puntuación quedaría colgando y la
+        // comparación con la denylist fallaría).
         let normalized = text
             .lowercased()
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .trimmingCharacters(in: CharacterSet(charactersIn: ".,!?¡¿"))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
 
-        guard normalized.count <= hallucinationTextLengthThreshold,
-              audioSeconds <= hallucinationAudioSecondsThreshold
-        else {
+        guard normalized.count <= hallucinationTextLengthThreshold else {
             return false
         }
 
         return knownHallucinationPhrases.contains(normalized)
+    }
+
+    /// Función pura: agrega las métricas de confianza por-segmento de una
+    /// transcripción a un único par `(noSpeechProb, avgLogProb)` para
+    /// alimentar la gate de alucinaciones.
+    ///
+    /// Agregación ROBUSTA (no promedio): `min(noSpeechProb)` y
+    /// `max(avgLogProb)`, es decir, se toma el segmento MÁS parecido a habla
+    /// real. Un promedio simple rechazaría por error un dictado real
+    /// multi-segmento con una pausa: p. ej. un segmento de habla
+    /// (noSpeech 0.3) + un segmento de silencio intermedio (noSpeech 1.0)
+    /// promedian 0.65 (> 0.6) y se descartaría todo el dictado. Con el mínimo,
+    /// basta con que UN segmento tenga confianza clara de habla para conservar
+    /// la transcripción; y el caso de campo (silencio puro → todos los
+    /// segmentos con noSpeech alto) sigue disparando porque incluso el mínimo
+    /// queda por encima del umbral.
+    /// Devuelve `(0, 0)` para una lista vacía (no dispara ninguna gate).
+    static func aggregateConfidence(
+        noSpeechProbs: [Float],
+        avgLogProbs: [Float]
+    ) -> (noSpeechProb: Float, avgLogProb: Float) {
+        let noSpeech = noSpeechProbs.min() ?? 0
+        let logProb = avgLogProbs.max() ?? 0
+        return (noSpeech, logProb)
     }
 
     private var whisperKit: WhisperKit?
@@ -250,22 +316,24 @@ public actor WhisperTranscriber: Transcribing, LanguageDetecting {
         KikiLog.log("kiki stt: inferencia completada en \(String(format: "%.1f", Date().timeIntervalSince(started)))s")
         let text = results.map(\.text).joined(separator: " ")
 
-        // Gate de alucinaciones (ver doc de `isLikelyHallucination`): se
-        // promedian las métricas de confianza de todos los segmentos de
-        // todos los resultados (normalmente uno solo por llamada) porque un
-        // único segmento de baja confianza dentro de un dictado largo no
-        // debe descartar el resto del texto real.
+        // Gate de alucinaciones (ver doc de `isLikelyHallucination` y de
+        // `aggregateConfidence`): las métricas de confianza por-segmento se
+        // agregan con min(noSpeechProb)/max(avgLogProb) — el segmento más
+        // parecido a habla real — para que una pausa intermedia en un dictado
+        // real multi-segmento no arrastre a rechazar todo el texto.
         let segments = results.flatMap(\.segments)
-        let avgNoSpeechProb = segments.isEmpty ? 0 : segments.map(\.noSpeechProb).reduce(0, +) / Float(segments.count)
-        let avgLogProb = segments.isEmpty ? 0 : segments.map(\.avgLogprob).reduce(0, +) / Float(segments.count)
+        let (noSpeechProb, avgLogProb) = Self.aggregateConfidence(
+            noSpeechProbs: segments.map(\.noSpeechProb),
+            avgLogProbs: segments.map(\.avgLogprob)
+        )
         let audioSeconds = Double(samples.count) / Self.sampleRate
         if Self.isLikelyHallucination(
             text: text,
-            noSpeechProb: avgNoSpeechProb,
+            noSpeechProb: noSpeechProb,
             avgLogProb: avgLogProb,
             audioSeconds: audioSeconds
         ) {
-            KikiLog.log("kiki stt: transcripción descartada — probable alucinación (noSpeech \(String(format: "%.2f", avgNoSpeechProb)), avgLogProb \(String(format: "%.2f", avgLogProb))): \"\(text)\"")
+            KikiLog.log("kiki stt: transcripción descartada — probable alucinación (noSpeech \(String(format: "%.2f", noSpeechProb)), avgLogProb \(String(format: "%.2f", avgLogProb))): \"\(text)\"")
             return ""
         }
 
