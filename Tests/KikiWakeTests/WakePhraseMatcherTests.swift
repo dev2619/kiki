@@ -244,4 +244,41 @@ final class WakePhraseMatcherTests: XCTestCase {
         XCTAssertNotNil(result)
         XCTAssertEqual(result?.remainder, "")
     }
+
+    // MARK: - Hyphen preservation in dictated remainder (Fix round 1)
+    //
+    // Regression: the hyphen-split tokenizer was shared between phrase-matching
+    // AND remainder extraction, so it silently dropped hyphens from DICTATED
+    // content — a real bug for a dictation app. The two tokenizations are now
+    // decoupled: originalWords/remainder split on WHITESPACE ONLY (hyphens
+    // preserved), hyphen-splitting applies ONLY to the normalized matching
+    // array.
+
+    func testRemainderPreservesHyphenInDictatedContent() {
+        let result = WakePhraseMatcher.match("escuchame kiki escribe user-name")
+        XCTAssertNotNil(result)
+        XCTAssertEqual(result?.remainder, "escribe user-name")
+    }
+
+    func testHyphenSplitPhraseStillMatchesAndPreservesHyphenInRemainder() {
+        // The phrase itself arrives hyphen-spelled ("Eska-Chame-Kiki.") — must
+        // still match — AND a hyphen in the dictated remainder must survive.
+        let result = WakePhraseMatcher.match("Eska-Chame-Kiki. escribe user-name")
+        XCTAssertNotNil(result)
+        XCTAssertEqual(result?.remainder, "escribe user-name")
+    }
+
+    // MARK: - Both slots required (safety invariant lock)
+
+    func testEscuchameAloneDoesNotMatch() {
+        XCTAssertNil(WakePhraseMatcher.match("escuchame"))
+    }
+
+    func testKikiAloneDoesNotMatch() {
+        XCTAssertNil(WakePhraseMatcher.match("kiki"))
+    }
+
+    func testKiwiAloneDoesNotMatch() {
+        XCTAssertNil(WakePhraseMatcher.match("kiwi"))
+    }
 }

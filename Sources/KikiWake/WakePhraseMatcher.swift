@@ -105,18 +105,49 @@ public enum WakePhraseMatcher {
         let trimmedTranscript = transcript.trimmingCharacters(in: .whitespaces)
         guard !trimmedTranscript.isEmpty else { return nil }
 
-        // Tokenize the transcript into original words
-        let originalWords = tokenizeWords(trimmedTranscript)
+        // Tokenización de las palabras ORIGINALES: SOLO por espacios en blanco,
+        // para preservar los guiones intactos dentro del dictado (kiki es una
+        // app de dictado — "user-name" debe llegar al remainder VERBATIM). El
+        // hyphen-split se aplica únicamente al array normalizado de matching
+        // (abajo), nunca a las palabras originales de las que se corta el
+        // remainder.
+        let originalWords = tokenizeOriginal(trimmedTranscript)
         guard !originalWords.isEmpty else { return nil }
 
-        // Normalize words for comparison
-        let normalizedWords = originalWords.map(normalizeWord(_:))
+        // Array normalizado y partido-por-guion para el matching. Cada token
+        // normalizado recuerda de qué índice de `originalWords` provino
+        // (`originIndex`), para poder cortar el remainder de `originalWords`
+        // (con los guiones intactos) aunque una palabra de la frase se haya
+        // partido en varios tokens normalizados por guion. Sin este back-ref,
+        // los conteos de tokens de ambos arrays divergen en la región de la
+        // frase y el remainder se cortaría en el offset equivocado.
+        var normalizedTokens: [String] = []
+        var originIndex: [Int] = []
+        for (i, word) in originalWords.enumerated() {
+            for sub in splitOnHyphen(word) {
+                let normalized = normalizeWord(sub)
+                guard !normalized.isEmpty else { continue }
+                normalizedTokens.append(normalized)
+                originIndex.append(i)
+            }
+        }
+        guard !normalizedTokens.isEmpty else { return nil }
 
         for slots in [spanishSlots, englishSlots] {
-            if let (start, consumed) = findSlotMatch(slots, in: normalizedWords) {
-                let endIndex = start + consumed
-                let remainderWords = Array(originalWords[endIndex...])
-                let remainder = remainderWords.joined(separator: " ")
+            if let (start, consumed) = findSlotMatch(slots, in: normalizedTokens) {
+                let endNormalized = start + consumed
+                // El remainder arranca en la palabra ORIGINAL dueña del primer
+                // token normalizado DESPUÉS de la región matcheada (recuperado
+                // vía `originIndex`), o vacío si la frase llegó al final. Así
+                // el corte es correcto en términos del array space-tokenizado
+                // sin importar cuántos guiones haya partido la frase por dentro.
+                let remainder: String
+                if endNormalized < normalizedTokens.count {
+                    let remainderStart = originIndex[endNormalized]
+                    remainder = originalWords[remainderStart...].joined(separator: " ")
+                } else {
+                    remainder = ""
+                }
                 return WakeMatch(remainder: remainder)
             }
         }
@@ -126,15 +157,22 @@ public enum WakePhraseMatcher {
 
     // MARK: - Private helpers
 
-    /// Tokeniza por espacios Y guiones. Los guiones se tratan como
-    /// separador de palabra (no solo el espacio) porque Whisper los usa para
-    /// deletrear fonéticamente palabras fuera de vocabulario ("Eska-Chame-
-    /// Kiki." — ver doc de tipo); una palabra compuesta real con guion
-    /// ("self-service") partiéndose en dos tokens no tiene ningún costo aquí:
-    /// solo importa para encontrar la frase de activación, y el remainder
-    /// (dictado real) reconstruye las palabras con espacios igual que antes.
-    private static func tokenizeWords(_ text: String) -> [String] {
-        text.split(whereSeparator: { $0 == " " || $0 == "-" })
+    /// Tokeniza SOLO por espacios en blanco — preserva los guiones dentro de
+    /// cada token (dictado real: "user-name" queda como un único token
+    /// verbatim). Es la base de la que se corta el remainder; el hyphen-split
+    /// para matching vive aparte en `splitOnHyphen` (ver `match`).
+    private static func tokenizeOriginal(_ text: String) -> [String] {
+        text.split(whereSeparator: { $0 == " " })
+            .map(String.init)
+    }
+
+    /// Parte un token por guiones. Los guiones se tratan como separador de
+    /// palabra SOLO para el matching (no para el remainder) porque Whisper los
+    /// usa para deletrear fonéticamente palabras fuera de vocabulario
+    /// ("Eska-Chame-Kiki." — ver doc de tipo). Aislar esto al camino de
+    /// matching es lo que evita mutilar guiones del contenido dictado.
+    private static func splitOnHyphen(_ token: String) -> [String] {
+        token.split(whereSeparator: { $0 == "-" })
             .map(String.init)
     }
 
@@ -178,6 +216,10 @@ public enum WakePhraseMatcher {
     }
 
     private static func matchSlot(_ slot: WakeSlot, in words: [String], at idx: Int) -> Int? {
+        // Guarda contra un `maxTokens` mal configurado (< 1): `1...maxTokens`
+        // haría trap de rango con 0. Un slot que no consume ningún token no
+        // tiene sentido, así que se trata como "no matchea".
+        guard slot.maxTokens >= 1 else { return nil }
         let targets = [slot.canonical] + slot.alternates
         for tokenCount in 1...slot.maxTokens {
             guard idx + tokenCount <= words.count else { break }
