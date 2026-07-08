@@ -42,6 +42,102 @@ public actor WhisperTranscriber: Transcribing, LanguageDetecting {
     /// la transcripción real y no aporta nada pasado cierto tamaño.
     private static let maxDictionaryPromptTokens = 120
 
+    /// Frecuencia de muestreo fija del pipeline de audio de kiki (ver
+    /// `AudioResampler.resampleTo16kMono`, `Sources/KikiAudio`). Se usa aquí
+    /// solo para derivar `audioSeconds` a partir de `samples.count` en la
+    /// gate de alucinaciones — no afecta a WhisperKit, que recibe las
+    /// muestras crudas.
+    private static let sampleRate: Double = 16_000
+
+    // MARK: - Rechazo de alucinaciones (silencio/ruido)
+    //
+    // Bug de campo (2026-07-06): ~1.2s de silencio ambiente sin habla real →
+    // Whisper "alucina" una de sus frases clásicas de training data
+    // ("Thank you.", "Gracias.") con alta confianza aparente en el texto,
+    // pero baja confianza real en sus propias métricas internas. WhisperKit
+    // expone esas métricas por segmento en `TranscriptionSegment`
+    // (`noSpeechProb`, `avgLogprob`; verificado en el checkout de WhisperKit,
+    // `Sources/WhisperKit/Core/Models.swift:574-585`). Se usan como gate
+    // primaria; una denylist de frases conocidas actúa como defensa
+    // secundaria para el residual donde la confianza es ambigua.
+
+    /// Umbral de `noSpeechProb` (probabilidad, calculada por el propio
+    /// Whisper, de que el segmento NO contenga habla) a partir del cual la
+    /// transcripción se descarta como alucinación de silencio. 0.6 se eligió
+    /// por encima del punto medio (0.5) para no descartar habla real
+    /// ambigua/con ruido de fondo, mientras sigue cubriendo el caso de campo
+    /// (silencio puro produce noSpeechProb típicamente >0.7-0.9).
+    static let noSpeechProbThreshold: Float = 0.6
+
+    /// Umbral de `avgLogprob` (log-probabilidad promedio de los tokens
+    /// generados) por debajo del cual el texto se considera de confianza tan
+    /// baja que es más probable que sea una alucinación que habla real.
+    /// -1.0 es el mismo valor de referencia que usa el propio whisper.cpp/
+    /// openai-whisper como `logprob_threshold` para decidir si reintentar la
+    /// decodificación por sospecha de mala transcripción.
+    static let avgLogProbThreshold: Float = -1.0
+
+    /// Duración de audio (segundos) por debajo de la cual, ADEMÁS de la gate
+    /// de confianza, se consulta la denylist de frases-fantasma conocidas.
+    /// Las frases de la lista pueden decirse de verdad, pero casi siempre
+    /// como parte de un dictado más largo — en segmentos de audio cortos
+    /// aisladas, son casi siempre eco del dataset de entrenamiento.
+    static let hallucinationAudioSecondsThreshold: Double = 2.0
+
+    /// Longitud máxima (caracteres, tras normalizar) del texto transcrito
+    /// para que aplique la denylist de frases-fantasma. Mantiene a salvo
+    /// dictados reales largos que contienen alguna de estas frases como
+    /// substring incidental.
+    static let hallucinationTextLengthThreshold: Int = 20
+
+    /// Frases clásicas que Whisper "alucina" sobre silencio o ruido
+    /// ambiente — heredadas de subtítulos de YouTube en su dataset de
+    /// entrenamiento (bug público y ampliamente documentado de Whisper).
+    /// Defensa de última línea (denylist): solo se consulta cuando la gate
+    /// de confianza no disparó Y tanto el audio como el texto son cortos —
+    /// así un "gracias" real dentro de un dictado largo nunca se descarta.
+    /// NOTA: "subtítulos realizados por la comunidad de amara.org" excede
+    /// `hallucinationTextLengthThreshold`; para ese caso concreto la
+    /// detección recae en la gate de confianza, no en esta lista.
+    static let knownHallucinationPhrases: Set<String> = [
+        "thank you",
+        "thanks for watching",
+        "gracias",
+        "subtítulos realizados por la comunidad de amara.org",
+        "subscribe",
+        "you",
+    ]
+
+    /// Función pura: decide si una transcripción es probablemente una
+    /// alucinación de silencio/ruido de Whisper. Combina la gate de
+    /// confianza (primaria: `noSpeechProb`/`avgLogProb`) con la denylist de
+    /// frases conocidas (secundaria: solo aplica con audio+texto cortos).
+    /// Extraída como función pura (sin `self`, sin WhisperKit) para poder
+    /// testear la lógica de umbrales de forma determinista.
+    static func isLikelyHallucination(
+        text: String,
+        noSpeechProb: Float,
+        avgLogProb: Float,
+        audioSeconds: Double
+    ) -> Bool {
+        if noSpeechProb >= noSpeechProbThreshold || avgLogProb <= avgLogProbThreshold {
+            return true
+        }
+
+        let normalized = text
+            .lowercased()
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: ".,!?¡¿"))
+
+        guard normalized.count <= hallucinationTextLengthThreshold,
+              audioSeconds <= hallucinationAudioSecondsThreshold
+        else {
+            return false
+        }
+
+        return knownHallucinationPhrases.contains(normalized)
+    }
+
     private var whisperKit: WhisperKit?
     public private(set) var isReady = false
     /// Idioma detectado en la ÚLTIMA transcripción ("es"/"en"), fijado en
@@ -152,7 +248,28 @@ public actor WhisperTranscriber: Transcribing, LanguageDetecting {
         let started = Date()
         let results = try await whisperKit.transcribe(audioArray: samples, decodeOptions: options)
         KikiLog.log("kiki stt: inferencia completada en \(String(format: "%.1f", Date().timeIntervalSince(started)))s")
-        return results.map(\.text).joined(separator: " ")
+        let text = results.map(\.text).joined(separator: " ")
+
+        // Gate de alucinaciones (ver doc de `isLikelyHallucination`): se
+        // promedian las métricas de confianza de todos los segmentos de
+        // todos los resultados (normalmente uno solo por llamada) porque un
+        // único segmento de baja confianza dentro de un dictado largo no
+        // debe descartar el resto del texto real.
+        let segments = results.flatMap(\.segments)
+        let avgNoSpeechProb = segments.isEmpty ? 0 : segments.map(\.noSpeechProb).reduce(0, +) / Float(segments.count)
+        let avgLogProb = segments.isEmpty ? 0 : segments.map(\.avgLogprob).reduce(0, +) / Float(segments.count)
+        let audioSeconds = Double(samples.count) / Self.sampleRate
+        if Self.isLikelyHallucination(
+            text: text,
+            noSpeechProb: avgNoSpeechProb,
+            avgLogProb: avgLogProb,
+            audioSeconds: audioSeconds
+        ) {
+            KikiLog.log("kiki stt: transcripción descartada — probable alucinación (noSpeech \(String(format: "%.2f", avgNoSpeechProb)), avgLogProb \(String(format: "%.2f", avgLogProb))): \"\(text)\"")
+            return ""
+        }
+
+        return text
     }
 
     /// Construye los tokens del initial prompt a partir de `dictionaryProvider.terms()`,
