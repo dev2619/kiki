@@ -263,7 +263,7 @@ private struct DictionarySectionView: View {
             }
         }
         .formStyle(.grouped)
-        .onAppear { newTermFocused = true }
+        .onAppear { DispatchQueue.main.async { newTermFocused = true } }
     }
 
     private func addTerm() {
@@ -335,7 +335,7 @@ private struct SnippetsSectionView: View {
             }
         }
         .formStyle(.grouped)
-        .onAppear { triggerFocused = true }
+        .onAppear { DispatchQueue.main.async { triggerFocused = true } }
     }
 
     private func addSnippet() {
