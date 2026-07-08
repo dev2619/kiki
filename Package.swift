@@ -55,7 +55,7 @@ let package = Package(
         .testTarget(name: "KikiRefineTests", dependencies: ["KikiRefine"]),
         .testTarget(
             name: "KikiSTTTests",
-            dependencies: ["KikiSTT", "KikiAudio"]
+            dependencies: ["KikiSTT", "KikiAudio", "KikiWake"]
         ),
     ]
 )
