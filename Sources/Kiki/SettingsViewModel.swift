@@ -18,6 +18,14 @@ extension Notification.Name {
     /// checkmark del ítem de menú equivalente sincronizado sin que
     /// `SettingsViewModel` conozca nada sobre `NSMenuItem`.
     static let kikiTranslateEnabledChanged = Notification.Name("kiki.translateEnabledChanged")
+
+    /// Posteada por `SettingsViewModel.alwaysListening.didSet` (modo
+    /// always-listening) cada vez que el toggle "Escucha siempre activa"
+    /// cambia desde Ajustes — permite que `AppDelegate` arranque/pare
+    /// `WakeListener` en caliente sin que `SettingsViewModel` conozca nada
+    /// sobre el listener ni el engine de audio (mismo desacople que
+    /// `.kikiTranslateEnabledChanged`).
+    static let kikiAlwaysListeningChanged = Notification.Name("kiki.alwaysListeningChanged")
 }
 
 /// Secciones del sidebar de Ajustes (`NavigationSplitView`, Fase 3.6). El
@@ -110,6 +118,33 @@ final class SettingsViewModel: ObservableObject {
     /// `@MainActor` hereda su aislamiento y ese call site no compila (Swift 6).
     nonisolated static let translateEnabledDefaultsKey = "kiki.translateEnabled"
 
+    /// Toggle "Escucha siempre activa" (Ajustes → General, modo
+    /// always-listening). Mismo patrón que `soundCuesEnabled`: el `didSet` es
+    /// la única fuente de escritura a `UserDefaults` desde la UI. Default
+    /// `true` (a diferencia de `soundCuesEnabled`/`translateEnabled`) por
+    /// pedido explícito del owner — la frase "escúchame kiki" debe funcionar
+    /// desde el primer arranque de la app, sin ningún toggle ni atajo previo.
+    ///
+    /// A diferencia de `soundCuesEnabled`/`translateEnabled` (sin efectos de
+    /// ciclo de vida), este toggle SÍ necesita arrancar/parar el
+    /// `WakeListener` — pero `SettingsViewModel` no tiene ninguna referencia
+    /// al listener ni al engine de audio (por diseño, ver el resto de esta
+    /// clase). En vez de inyectar esa dependencia, el `didSet` postea
+    /// `.kikiAlwaysListeningChanged` (mismo patrón de notificación que
+    /// `translateEnabled` ya usa para el checkmark del menú) y `AppDelegate`
+    /// reacciona arrancando/parando el engine — ver
+    /// `AppDelegate.handleAlwaysListeningChanged`.
+    @Published var alwaysListening: Bool {
+        didSet {
+            UserDefaults.standard.set(alwaysListening, forKey: Self.alwaysListeningDefaultsKey)
+            NotificationCenter.default.post(name: .kikiAlwaysListeningChanged, object: nil)
+        }
+    }
+
+    /// `nonisolated` por la misma razón que `translateEnabledDefaultsKey`:
+    /// `AppDelegate.effectiveAlwaysListening()` la lee fuera de MainActor.
+    nonisolated static let alwaysListeningDefaultsKey = "kiki.alwaysListening"
+
     /// Sección seleccionada del sidebar, persistida en `UserDefaults` y
     /// restaurada la próxima vez que se abre Ajustes (Fase 3.6, Task 2).
     @Published var selectedSection: SettingsSection {
@@ -152,6 +187,9 @@ final class SettingsViewModel: ObservableObject {
             ? defaults.bool(forKey: SoundCues.enabledDefaultsKey)
             : true
         self.translateEnabled = defaults.bool(forKey: Self.translateEnabledDefaultsKey)
+        self.alwaysListening = defaults.object(forKey: Self.alwaysListeningDefaultsKey) != nil
+            ? defaults.bool(forKey: Self.alwaysListeningDefaultsKey)
+            : true
         if let rawSection = defaults.string(forKey: Self.settingsSectionKey),
            let restored = SettingsSection(rawValue: rawSection) {
             self.selectedSection = restored

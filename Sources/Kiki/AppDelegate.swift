@@ -27,6 +27,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return Float(stored)
     }
 
+    /// Lee `kiki.alwaysListening` de `UserDefaults`, default `true` cuando la
+    /// clave está ausente (pedido explícito del owner: la frase de activación
+    /// debe funcionar desde el primer arranque, sin acción previa). Mismo
+    /// patrón de "ausente vs. false" que `SettingsViewModel.soundCuesEnabled`
+    /// — `bool(forKey:)` no distingue ambos casos, así que se chequea
+    /// `object(forKey:) != nil` explícitamente. La clave vive en
+    /// `SettingsViewModel.alwaysListeningDefaultsKey` (fuente de escritura),
+    /// igual que `translateEnabledDefaultsKey`.
+    private static func effectiveAlwaysListening() -> Bool {
+        let defaults = UserDefaults.standard
+        return defaults.object(forKey: SettingsViewModel.alwaysListeningDefaultsKey) != nil
+            ? defaults.bool(forKey: SettingsViewModel.alwaysListeningDefaultsKey)
+            : true
+    }
+
     /// `Application Support/kiki`, ubicación real de los stores de
     /// personalización (Fase 3, Task 4) — separada de cualquier directorio
     /// temporal usado en tests.
@@ -47,6 +62,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var hud: HUDController!
     private var wakeListener: WakeListener!
     private var wakeEnabled = UserDefaults.standard.bool(forKey: AppDelegate.wakeEnabledKey)
+    /// Espejo de lectura de `kiki.alwaysListening`. La fuente de escritura es
+    /// `SettingsViewModel.alwaysListening.didSet` (mismo patrón que
+    /// `translateEnabled`/`.kikiTranslateEnabledChanged`) — `AppDelegate` lee
+    /// el valor inicial directamente de `UserDefaults` al arrancar y luego se
+    /// mantiene sincronizado vía `.kikiAlwaysListeningChanged`
+    /// (`handleAlwaysListeningChanged`), que además arranca/para el
+    /// `wakeListener` en caliente. Cuando es `true`, la frase de activación
+    /// funciona sin que `wakeEnabled` (el toggle "Manos libres") esté
+    /// encendido — ver `markReady`, `dictationStateDidChange` y `toggleWake`.
+    private var alwaysListening = AppDelegate.effectiveAlwaysListening()
     private var wakePausedByDictation = false
     /// `true` cuando la pausa en curso (`dictationStateDidChange` con
     /// `state != .idle`) fue originada por una captura de manos-libres
@@ -96,6 +121,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             queue: .main
         ) { [weak self] _ in
             Task { @MainActor in self?.syncTranslateMenuCheckmark() }
+        }
+
+        // Reacciona en caliente cuando el toggle "Escucha siempre activa" de
+        // Ajustes cambia (`SettingsViewModel.alwaysListening.didSet`, mismo
+        // patrón de notificación que `.kikiTranslateEnabledChanged` arriba) —
+        // arranca/para `wakeListener` según corresponda (ver
+        // `handleAlwaysListeningChanged`). Igual que el observer de arriba,
+        // `wakeListener` puede no existir todavía en este punto del arranque;
+        // `handleAlwaysListeningChanged` solo se dispara tras la primera
+        // mutación real del toggle desde la UI, que requiere la ventana de
+        // Ajustes abierta y por tanto la app ya completamente inicializada.
+        NotificationCenter.default.addObserver(
+            forName: .kikiAlwaysListeningChanged,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.handleAlwaysListeningChanged() }
         }
 
         controller = DictationController(
@@ -238,7 +280,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// la línea base) en vez del antiguo sufijo "👂" — `button.title` queda
     /// SIEMPRE vacío. Fallback al SF Symbol si el recurso no carga.
     private func updateStatusIcon() {
-        let resourceName = wakeEnabled ? "MenuBarIconActive@2x" : "MenuBarIcon@2x"
+        // "Activo" ya no es solo `wakeEnabled` (el toggle "Manos libres"):
+        // con `alwaysListening` encendido, el listener puede estar
+        // efectivamente escuchando (`.listening`/`.armed`, cualquier estado
+        // salvo `.stopped`) sin que ese toggle esté prendido — el glifo debe
+        // reflejar que kiki SÍ está escuchando la frase en ese caso. No se
+        // llama `wakeListener.state` (que hace `queue.sync`) desde ningún
+        // hot path de audio, así que el costo es despreciable aquí.
+        let isActive = wakeEnabled || (alwaysListening && wakeListener.state != .stopped)
+        let resourceName = isActive ? "MenuBarIconActive@2x" : "MenuBarIcon@2x"
         if let iconURL = Bundle.main.url(forResource: resourceName, withExtension: "png"),
            let glyph = NSImage(contentsOf: iconURL) {
             glyph.size = NSSize(width: 18, height: 18)
@@ -246,7 +296,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             statusItem.button?.image = glyph
         } else {
             statusItem.button?.image = NSImage(
-                systemSymbolName: wakeEnabled ? "waveform" : "mic.fill",
+                systemSymbolName: isActive ? "waveform" : "mic.fill",
                 accessibilityDescription: "kiki")
         }
         statusItem.button?.title = ""
@@ -304,6 +354,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             UserDefaults.standard.set(false, forKey: Self.wakeEnabledKey)
             SoundCues.play(.disarmed)
             hud.showTransient("Manos libres desactivado")
+            // `stopAndFlush()` paró el listener POR COMPLETO — pero si
+            // `alwaysListening` sigue encendido, este toggle ya NO es el
+            // prerequisito de la frase (ver doc de `alwaysListening`): hay
+            // que re-arrancarlo en `.listening` fresco (sin arme heredado,
+            // frase de nuevo) para que "escúchame kiki" siga funcionando tras
+            // apagar "Manos libres".
+            if alwaysListening {
+                do {
+                    try wakeListener.start()
+                } catch {
+                    wakeStartFailed(error, context: "al reanudar escucha siempre activa tras apagar manos libres")
+                }
+            }
         } else {
             do {
                 try wakeListener.start()
@@ -400,6 +463,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         settingsViewModel.syncWakeEnabled(wakeEnabled)
     }
 
+    /// Reacciona a `.kikiAlwaysListeningChanged` (posteado por
+    /// `SettingsViewModel.alwaysListening.didSet`, ver doc de `alwaysListening`
+    /// arriba): releé `UserDefaults` (fuente de verdad de escritura) y
+    /// arranca/para `wakeListener` para que el toggle de Ajustes tenga efecto
+    /// inmediato sin esperar al próximo ciclo de pausa/resume del hotkey.
+    ///
+    /// Si hay un dictado en curso (`wakePausedByDictation`, el listener ya
+    /// está parado por `dictationStateDidChange`), no se toca el engine
+    /// aquí — el propio resume al volver a `.idle` releerá `alwaysListening`
+    /// (ya actualizado arriba) y decidirá correctamente sin crear una carrera
+    /// entre este handler y la pausa por dictado.
+    @MainActor private func handleAlwaysListeningChanged() {
+        let key = SettingsViewModel.alwaysListeningDefaultsKey
+        let defaults = UserDefaults.standard
+        let newValue = defaults.object(forKey: key) != nil ? defaults.bool(forKey: key) : true
+        guard newValue != alwaysListening else { return }
+        alwaysListening = newValue
+        updateStatusIcon()
+        guard !wakePausedByDictation else { return }
+        if alwaysListening {
+            guard wakeListener.state == .stopped else { return }
+            do {
+                try wakeListener.start()
+            } catch {
+                wakeStartFailed(error, context: "al activar escucha siempre activa")
+            }
+            updateStatusIcon()
+        } else if !wakeEnabled {
+            // Apagado y `wakeEnabled` también OFF: nada más quiere el
+            // listener corriendo — a diferencia de `toggleWake`, aquí no hay
+            // dictado en curso que volcar (ver guard de arriba), así que
+            // `stop()` liso basta (mismo criterio que la coordinación de
+            // pausa por hotkey, no `stopAndFlush()`).
+            wakeListener.stop()
+            updateStatusIcon()
+        }
+    }
+
     private func loadModelInBackground() {
         // Un solo Task (hereda MainActor) para que la carga de Whisper y la
         // del LLM queden serializadas — evita llamadas concurrentes a
@@ -442,14 +543,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // El listener de manos libres depende del mismo WhisperTranscriber
         // que el dictado por hotkey — solo arranca una vez que el modelo
         // terminó de cargar, independientemente de si el refinado LLM quedó
-        // disponible o no.
-        if wakeEnabled {
+        // disponible o no. Arranca si CUALQUIERA de los dos quiere el
+        // listener corriendo: `wakeEnabled` (toggle "Manos libres" ON, quizás
+        // persistido de una sesión anterior) o `alwaysListening` (default
+        // `true` — la frase debe funcionar desde el primer arranque sin
+        // ninguna acción previa, ver doc de `alwaysListening`).
+        if wakeEnabled || alwaysListening {
             do {
                 try wakeListener.start()
             } catch {
                 wakeStartFailed(error, context: "al iniciar manos libres en el arranque")
             }
         }
+        updateStatusIcon()
     }
 }
 
@@ -486,7 +592,14 @@ extension AppDelegate: DictationControllerDelegate {
         // AudioRecorder del dictado por hotkey y el AVAudioEngine interno de
         // WakeListener) y evita que el propio audio del dictado dispare
         // falsos positivos de la frase de activación.
-        if state != .idle && wakeEnabled {
+        //
+        // Gateado por `wakeEnabled || alwaysListening`: con `alwaysListening`
+        // encendido el listener puede estar corriendo (escuchando la frase)
+        // aunque `wakeEnabled` esté OFF — sigue habiendo que pararlo durante
+        // CUALQUIER dictado por hotkey (evita el doble engine) y reanudarlo
+        // al volver a `.idle`, sin que el toggle "Manos libres" sea
+        // prerequisito de ninguna de las dos mitades.
+        if state != .idle && (wakeEnabled || alwaysListening) {
             wakeListener.stop()
             // Si la pausa la originó una captura de manos-libres
             // (`resumeAsArmed`), la pill "👂 Te escucho…" debe persistir en
@@ -496,7 +609,7 @@ extension AppDelegate: DictationControllerDelegate {
             // pegada en pantalla si la sesión termina perdiéndose.
             if !resumeAsArmed { hud.showArmed(false) }
             wakePausedByDictation = true
-        } else if state == .idle && wakePausedByDictation && wakeEnabled {
+        } else if state == .idle && wakePausedByDictation && (wakeEnabled || alwaysListening) {
             do {
                 if resumeAsArmed {
                     try wakeListener.resumeArmed()
@@ -509,6 +622,7 @@ extension AppDelegate: DictationControllerDelegate {
             wakePausedByDictation = false
             resumeAsArmed = false
         }
+        updateStatusIcon()
     }
 
     func dictationDidFail(_ error: DictationError) {
@@ -570,10 +684,15 @@ extension AppDelegate: WakeListenerDelegate {
         //    — sin el token, el resume rearmaría el mic sin frase ni chime
         //    (regresión de privacidad). El habla se procesa igual: la
         //    frescura solo gatea el efecto de estado, nunca la entrega.
-        // Además gateado por `wakeEnabled`: si el usuario apagó el modo
-        // manos-libres mientras la captura estaba en vuelo, el dictado se
-        // entrega y pega igual, pero no debe rearmar el mic tras procesar.
-        resumeAsArmed = wakeEnabled && sessionIsCurrent
+        // Además gateado por `wakeEnabled || alwaysListening`: si ninguno de
+        // los dos quería el modo manos-libres activo cuando la captura llegó
+        // (p.ej. el usuario apagó "Manos libres" Y `alwaysListening` está
+        // OFF mientras la captura estaba en vuelo), el dictado se entrega y
+        // pega igual, pero no debe rearmar el mic tras procesar. Con
+        // `alwaysListening` ON, la frase pudo haber armado esta sesión SIN
+        // que `wakeEnabled` estuviera encendido — el resume debe seguir
+        // tratándola como sesión vigente igual que con el toggle prendido.
+        resumeAsArmed = (wakeEnabled || alwaysListening) && sessionIsCurrent
         // No hud.show(state: .idle) aquí: controller.process() dispara
         // dictationStateDidChange(.processing) casi de inmediato vía su
         // delegate, así que un orderOut(.idle) intermedio solo producía un
@@ -590,9 +709,10 @@ extension AppDelegate: WakeListenerDelegate {
         // Mismo razonamiento que wakeListenerDidCapture: el dictado en el
         // mismo aliento también abre/continúa una sesión continua — tras
         // procesarlo, el listener debe reanudar armado, no volver a
-        // listening plano. Gateado por `wakeEnabled` y por el token de
-        // frescura por las mismas razones (ver traza de la carrera arriba).
-        resumeAsArmed = wakeEnabled && sessionIsCurrent
+        // listening plano. Gateado por `wakeEnabled || alwaysListening` y por
+        // el token de frescura por las mismas razones (ver traza de la
+        // carrera arriba y el comentario equivalente en wakeListenerDidCapture).
+        resumeAsArmed = (wakeEnabled || alwaysListening) && sessionIsCurrent
         // `language` viene capturado JUNTO con el texto por WakeListener (misma
         // unidad serializada que su `transcribe()`), así que se pasa explícito
         // — el controller NO debe releerlo del transcriber en este path (cierre

@@ -178,6 +178,12 @@ private struct GeneralSectionView: View {
             }
 
             Section {
+                Toggle("Escucha siempre activa", isOn: $viewModel.alwaysListening)
+            } footer: {
+                Text("Con esto activado (por defecto), decir \"escúchame kiki\" empieza a dictar sin tocar nada — ni el toggle de arriba ni ⌥⌘K. Para que la frase funcione en cualquier momento, el micrófono queda abierto todo el tiempo que kiki esté corriendo (macOS muestra el punto naranja de uso de micrófono de forma permanente en la barra de menú). Si el ruido de fondo te molesta, prueba activando \"Aislamiento de voz\" en Centro de Control → micrófono.")
+            }
+
+            Section {
                 Toggle("Traducir al dictar", isOn: $viewModel.translateEnabled)
             } footer: {
                 Text("Con esto activado, kiki traduce cada dictado al otro idioma (español↔inglés) en vez de solo limpiarlo. Con esto desactivado (por defecto), kiki nunca cambia el idioma en el que dictaste.")
