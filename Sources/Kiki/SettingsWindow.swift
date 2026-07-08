@@ -211,6 +211,19 @@ private struct GeneralSectionView: View {
 private struct DictionarySectionView: View {
     @ObservedObject var viewModel: SettingsViewModel
     @State private var newTerm = ""
+    // `@FocusState` con autofocus en `.onAppear` (Fase 3.8 — fix Diccionario/
+    // Snippets): en macOS 26, el click-to-focus normal sobre un `TextField`
+    // dentro de un `Form`/`Section` anidado en el detail pane de un
+    // `NavigationSplitView` hosteado por `NSHostingController` puede no
+    // ganar first-responder de forma fiable (mismo síntoma-clase que el bug
+    // de `List(selection:)` que obligó a reemplazar el sidebar por botones —
+    // ver `SettingsRootView`). Forzar el foco explícitamente vía
+    // `@FocusState` en vez de depender solo del click da un camino de
+    // entrada de teclado que no depende del hit-testing de mouse-down de
+    // AppKit, así que el campo queda listo para escribir apenas se entra a
+    // la sección, sin bloquear tampoco el click manual (`.focused` sigue
+    // permitiendo foco por click normalmente).
+    @FocusState private var newTermFocused: Bool
 
     var body: some View {
         Form {
@@ -224,7 +237,7 @@ private struct DictionarySectionView: View {
                     .frame(maxWidth: .infinity)
                 } else {
                     ForEach(viewModel.terms, id: \.self) { term in
-                        HoverDeleteRow(onDelete: { viewModel.removeTerm(term) }) {
+                        DeletableRow(onDelete: { viewModel.removeTerm(term) }) {
                             Text(term)
                         }
                     }
@@ -238,6 +251,8 @@ private struct DictionarySectionView: View {
             Section {
                 HStack {
                     TextField("Nuevo término (p. ej. un nombre propio)", text: $newTerm)
+                        .textFieldStyle(.roundedBorder)
+                        .focused($newTermFocused)
                         .onSubmit(addTerm)
                     Button(action: addTerm) {
                         Image(systemName: "plus")
@@ -248,6 +263,7 @@ private struct DictionarySectionView: View {
             }
         }
         .formStyle(.grouped)
+        .onAppear { newTermFocused = true }
     }
 
     private func addTerm() {
@@ -262,6 +278,10 @@ private struct SnippetsSectionView: View {
     @ObservedObject var viewModel: SettingsViewModel
     @State private var trigger = ""
     @State private var template = ""
+    // Ver comentario en `DictionarySectionView.newTermFocused` — mismo fix,
+    // mismo motivo: autofocus explícito del primer campo de texto en vez de
+    // depender solo del click.
+    @FocusState private var triggerFocused: Bool
 
     var body: some View {
         Form {
@@ -275,7 +295,7 @@ private struct SnippetsSectionView: View {
                     .frame(maxWidth: .infinity)
                 } else {
                     ForEach(viewModel.snippets, id: \.trigger) { snippet in
-                        HoverDeleteRow(onDelete: { viewModel.removeSnippet(trigger: snippet.trigger) }) {
+                        DeletableRow(onDelete: { viewModel.removeSnippet(trigger: snippet.trigger) }) {
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(snippet.trigger).bold()
                                 Text(snippet.template)
@@ -295,7 +315,12 @@ private struct SnippetsSectionView: View {
             Section {
                 VStack(alignment: .leading, spacing: 8) {
                     TextField("Trigger (lo que dictas)", text: $trigger)
+                        .textFieldStyle(.roundedBorder)
+                        .focused($triggerFocused)
+                        .onSubmit(addSnippet)
                     TextField("Plantilla (lo que se inserta)", text: $template)
+                        .textFieldStyle(.roundedBorder)
+                        .onSubmit(addSnippet)
                     HStack {
                         Spacer()
                         Button(action: addSnippet) {
@@ -310,9 +335,17 @@ private struct SnippetsSectionView: View {
             }
         }
         .formStyle(.grouped)
+        .onAppear { triggerFocused = true }
     }
 
     private func addSnippet() {
+        // No limpiar los campos si `template`/`trigger` está vacío (p. ej.
+        // Enter en "Trigger" antes de llenar "Plantilla"): `addSnippet` del
+        // ViewModel no añade nada en ese caso (guard interno), así que
+        // limpiar igual perdería lo que el usuario ya escribió.
+        guard !trigger.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !template.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else { return }
         viewModel.addSnippet(trigger: trigger, template: template)
         trigger = ""
         template = ""
@@ -464,28 +497,28 @@ private struct AboutSectionView: View {
 
 // MARK: - Shared
 
-/// Fila con botón de borrado (`trash`) que solo aparece al pasar el mouse
-/// por encima, más un ítem equivalente en el menú contextual (clic derecho)
-/// para descubribilidad sin depender del hover — patrón macOS-nativo (Mail,
-/// Notas) en vez del botón siempre visible de la versión anterior.
-private struct HoverDeleteRow<Content: View>: View {
+/// Fila con botón de borrado (`trash`) SIEMPRE visible (Fase 3.8 — fix
+/// Diccionario/Snippets: la versión anterior solo mostraba el botón al
+/// pasar el mouse por encima, lo cual además de ser poco descubrible
+/// dependía de eventos `onHover`/`mouseMoved` que en esta ventana
+/// (`NSHostingController` programático, foco poco fiable en macOS 26 — ver
+/// nota en `DictionarySectionView.newTermFocused`) no son tan confiables
+/// como un click directo sobre un botón siempre presente. El menú contextual
+/// (clic derecho) se mantiene como vía alternativa.
+private struct DeletableRow<Content: View>: View {
     let onDelete: () -> Void
     @ViewBuilder let content: () -> Content
-    @State private var isHovering = false
 
     var body: some View {
         HStack {
             content()
             Spacer()
-            if isHovering {
-                Button(role: .destructive, action: onDelete) {
-                    Image(systemName: "trash")
-                }
-                .buttonStyle(.borderless)
+            Button(role: .destructive, action: onDelete) {
+                Image(systemName: "trash")
             }
+            .buttonStyle(.borderless)
         }
         .contentShape(Rectangle())
-        .onHover { isHovering = $0 }
         .contextMenu {
             Button("Eliminar", role: .destructive, action: onDelete)
         }
