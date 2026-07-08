@@ -108,6 +108,14 @@ Tras transcribir con Whisper, el texto se pasa a un modelo LLM local (Qwen2.5-3B
 - Si el modelo no se descarga en el inicio, el menú dice "Listo (sin refinado IA)" — la app funciona con Whisper solo (Fase 1).
 - El dictado nunca se pierde: siempre hay algo que insertar.
 
+## Escucha siempre activa (Fase 3.8)
+
+Con **"Escucha siempre activa"** (Ajustes → General, activado por defecto), decir *"escúchame kiki"* / *"listen to me kiki"* inicia el dictado **sin tocar nada** — ni el toggle ni ⌥⌘K ni una tecla. El micrófono queda atento desde que kiki arranca.
+
+- El reconocimiento de la frase es tolerante a cómo Whisper la transcribe realmente (a veces la escribe fonético, "Eska-Chame-Kiki", por su detección de idioma en frases cortas): matching por slots con tolerancia a errores y a palabras partidas, exigiendo siempre ambas partes para no dispararse solo.
+- ⌥⌘K y el toggle siguen sirviendo para dictar al instante sin frase.
+- **Consecuencia:** el micrófono permanece abierto de forma continua, así que macOS muestra su indicador naranja de micrófono siempre encendido mientras kiki corre. Ese indicador es de macOS, no de kiki. **Tip:** en ese mismo menú de macOS (Centro de Control → micrófono) activa **"Voice Isolation"** para filtrar ruido de fondo y mejorar la precisión.
+
 ## Modo traducción (Fase 3.7)
 
 Toggle **"Traducir al dictar"** en el menú 🎤 y en Ajustes → General (apagado por defecto).
@@ -186,13 +194,17 @@ Nota sobre timeouts: si dices la frase (o armas con **⌥⌘K**) y no dictas nad
 - Cero latencia: la expansión es instantánea, no requiere IA.
 - Ej: trigger "firma corta" (tal como lo dirías en voz alta) → plantilla "Saludos, Ana" (sin refinado, listo en ms).
 
-**Historial (mejorado en 3.6):**
-- Últimos 200 dictados grabados: cada fila muestra `[crudo: texto de Whisper] [final: texto después de refinado]`.
-- **Refresco en vivo** — se actualiza automáticamente al completarse cada dictado (sin necesidad de cambiar de pestaña).
-- **Fechas relativas** — "hace 2 minutos", "hace 1 hora", etc., en lugar de timestamps absolutos.
-- Botón copiar por fila (copia el campo final).
-- Botón "Borrar todo" (limpia el historial; no se puede deshacer).
+**Historial (mejorado en 3.6 y 3.8):**
+- Cada fila muestra `[crudo: texto de Whisper] [final: texto después de refinado]`.
+- **Cantidad configurable (Fase 3.8)** — elige cuántas dictadas conservar: 50 / 100 / 200 (default) / 500 / 1000. Se guardan las más recientes; las más antiguas se descartan (FIFO). No hay expiración por tiempo.
+- **Búsqueda/filtro (Fase 3.8)** — campo de búsqueda que filtra por texto (crudo + final), insensible a mayúsculas y acentos ("reunion" encuentra "reunión").
+- **Refresco en vivo** — se actualiza automáticamente al completarse cada dictado.
+- **Fechas relativas** — "hace 2 minutos", etc.
+- Botón copiar por fila; "Borrar todo" (no se puede deshacer).
 - 100% local en JSON — nunca sale del Mac.
+
+**Diccionario / Snippets (funcional desde 3.8):**
+- Al abrir la sección, el cursor entra automáticamente en el campo de entrada; agrega con Enter o el botón +; el botón de borrar (basura) es siempre visible por fila.
 
 **Persistencia:**
 - Diccionario, snippets e historial se guardan en JSON atómico en `~/Library/Application Support/kiki/` (v1 basada en JSON; migración a SQLite abierta para v2).
