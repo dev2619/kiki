@@ -184,6 +184,12 @@ private struct GeneralSectionView: View {
             }
 
             Section {
+                Toggle("Refinar dictado con IA", isOn: $viewModel.refineEnabled)
+            } footer: {
+                Text("Con esto activado (por defecto), kiki limpia el dictado con IA: quita muletillas (\"eh\", \"o sea\") y arregla puntuación y mayúsculas, sin cambiar tus palabras. Desactívalo si prefieres insertar exactamente lo que transcribe el dictado, sin ninguna corrección automática.")
+            }
+
+            Section {
                 Toggle("Traducir al dictar", isOn: $viewModel.translateEnabled)
             } footer: {
                 Text("Con esto activado, kiki traduce cada dictado al otro idioma (español↔inglés) en vez de solo limpiarlo. Con esto desactivado (por defecto), kiki nunca cambia el idioma en el que dictaste.")

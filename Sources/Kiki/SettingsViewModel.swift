@@ -92,6 +92,24 @@ final class SettingsViewModel: ObservableObject {
         }
     }
 
+    /// Toggle "Refinar dictado con IA" (Ajustes → General, bugfix de fidelidad
+    /// 2026-07-08). Default ON — la limpieza (muletillas, puntuación) agrega
+    /// valor. Apagado = insertar EXACTAMENTE la transcripción de Whisper, sin
+    /// que el LLM toque nada; para el usuario que prefiere sus palabras literales
+    /// a cualquier corrección automática. Mismo patrón "ausente = true" que
+    /// `soundCuesEnabled`. `AppDelegate` lee la misma clave directamente en la
+    /// closure `refineEnabled` que pasa a `DictationController`, así que el
+    /// `didSet` solo persiste — sin notificación cruzada.
+    @Published var refineEnabled: Bool {
+        didSet {
+            UserDefaults.standard.set(refineEnabled, forKey: Self.refineEnabledDefaultsKey)
+        }
+    }
+
+    /// `nonisolated` por la misma razón que `translateEnabledDefaultsKey`:
+    /// `AppDelegate` la lee fuera de MainActor en la closure `refineEnabled`.
+    nonisolated static let refineEnabledDefaultsKey = "kiki.refineEnabled"
+
     /// Toggle "Traducir al dictar" (Ajustes → General, Fase: fidelidad de
     /// idioma / Fix 2). Default OFF (`bool(forKey:)` de `UserDefaults`
     /// devuelve `false` cuando la clave no existe, así que no hace falta el
@@ -206,6 +224,9 @@ final class SettingsViewModel: ObservableObject {
         let defaults = UserDefaults.standard
         self.soundCuesEnabled = defaults.object(forKey: SoundCues.enabledDefaultsKey) != nil
             ? defaults.bool(forKey: SoundCues.enabledDefaultsKey)
+            : true
+        self.refineEnabled = defaults.object(forKey: Self.refineEnabledDefaultsKey) != nil
+            ? defaults.bool(forKey: Self.refineEnabledDefaultsKey)
             : true
         self.translateEnabled = defaults.bool(forKey: Self.translateEnabledDefaultsKey)
         self.alwaysListening = defaults.object(forKey: Self.alwaysListeningDefaultsKey) != nil

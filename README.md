@@ -18,7 +18,7 @@ Mantén <strong>Fn</strong> (o di <em>"escúchame kiki"</em>), habla, suelta —
 |---|---|
 | **Dictado por tecla** | Mantén **Fn**, habla, suelta → texto refinado donde esté el cursor |
 | **Manos libres** | Di *"escúchame kiki"* / *"listen to me kiki"* → dicta de corrido; o **⌥⌘K** para dictar al instante sin frase |
-| **Refinado con IA local** | Limpia muletillas, puntúa y adapta el tono a la app activa (Slack/VS Code/Mail…) |
+| **Refinado con IA local** | Corrección mínima y fiel: quita muletillas y puntúa **sin cambiar tus palabras** (se puede apagar en Ajustes) |
 | **Modo traducción** | Toggle "Traducir al dictar": habla en un idioma, escribe en el otro (es⇄en) |
 | **Diccionario personal** | Reconoce y escribe tus términos exactos (inyectado en Whisper y el LLM) |
 | **Snippets de voz** | Di un trigger → inserta una plantilla, sin pasar por la IA |
@@ -88,25 +88,19 @@ Módulos SPM: `KikiCore` (máquina de estados) · `KikiAudio` (mic → 16 kHz mo
 
 ## Refinado con IA (Fase 2A)
 
-Tras transcribir con Whisper, el texto se pasa a un modelo LLM local (Qwen2.5-3B-Instruct-4bit, ~1.8 GB) que:
-- Limpia muletillas típicas (uh, eh, hmm)
-- Añade puntuación
-- Adapta el tono según la app activa (detectada con Accessibility API)
+Tras transcribir con Whisper, el texto se pasa a un modelo LLM local (Qwen2.5-3B-Instruct-4bit, ~1.8 GB) que hace una **corrección mínima y fiel**:
+- Quita muletillas y rellenos (eh, em, este, o sea, like) y falsos comienzos
+- Corrige puntuación y mayúsculas
+- **Conserva tus palabras exactas y la estructura de la frase** — no reformula, no resume, no reordena, no cambia el tipo de frase (una orden sigue siendo orden, una pregunta sigue siendo pregunta)
 
-**Perfiles de tono por tipo de app:**
+> **Fidelidad primero (2026-07-08).** El refinado corrige, no reescribe. Antes adaptaba el "tono" según la app y eso hacía que el modelo parafraseara tus palabras (p. ej. convertía "Dame la lista…" en "Lista de…:"). Ahora el único ajuste por app que sobrevive es en editores de código/terminal: los términos técnicos, comandos y nombres de librerías se dejan **exactos**, sin traducir.
 
-| Tipo | Perfil | Apps |
-|------|--------|------|
-| code | neutral-técnico (sin emojis, snake_case en vars) | VS Code, Xcode, JetBrains, Terminal, iTerm, Sublime, Warp |
-| chat | casual-coloquial (emojis OK, lenguaje relajado) | Slack, Discord, Telegram, WhatsApp, Messages |
-| email | formal-profesional (saludos, cierres, sin coloquialismos) | Mail, Outlook, Spark |
-| docs | formal-narrativo (párrafos bien estructurados) | Notes, TextEdit, Obsidian, Word, Notion |
-| resto | neutral (sin cambios estilísticos) | cualquier otra app |
+**Toggle "Refinar dictado con IA"** (Ajustes → General, activado por defecto): apágalo para insertar **exactamente** la transcripción de Whisper, sin que la IA toque nada. La traducción es un modo aparte y sigue funcionando aunque el refinado esté apagado.
 
-**Regla de degradación:**
-- Si el modelo LLM falla a cargar, o la refinación tarda >5s, se inserta el texto crudo de Whisper sin pérdida de información.
+**Reglas de degradación (el dictado nunca se pierde — siempre se inserta algo):**
+- Si el modelo LLM falla a cargar, o la refinación tarda >5s, se inserta el texto crudo de Whisper.
+- **Guardia de fidelidad:** si el refinado introduce demasiado vocabulario que no dijiste (señal de que parafraseó o "respondió" el dictado en vez de limpiarlo), se descarta y se inserta el texto crudo.
 - Si el modelo no se descarga en el inicio, el menú dice "Listo (sin refinado IA)" — la app funciona con Whisper solo (Fase 1).
-- El dictado nunca se pierde: siempre hay algo que insertar.
 
 ## Escucha siempre activa (Fase 3.8)
 

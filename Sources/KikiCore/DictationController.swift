@@ -36,6 +36,7 @@ public final class DictationController {
     private let minRefinableLength: Int
     private let languageProvider: LanguageDetecting?
     private let translateEnabled: () -> Bool
+    private let refineEnabled: () -> Bool
 
     public init(
         recorder: AudioRecording,
@@ -50,7 +51,8 @@ public final class DictationController {
         history: HistoryRecording? = nil,
         minRefinableLength: Int = 25,
         languageProvider: LanguageDetecting? = nil,
-        translateEnabled: @escaping () -> Bool = { false }
+        translateEnabled: @escaping () -> Bool = { false },
+        refineEnabled: @escaping () -> Bool = { true }
     ) {
         self.recorder = recorder
         self.transcriber = transcriber
@@ -65,6 +67,7 @@ public final class DictationController {
         self.minRefinableLength = minRefinableLength
         self.languageProvider = languageProvider
         self.translateEnabled = translateEnabled
+        self.refineEnabled = refineEnabled
     }
 
     public func hotkeyPressed() {
@@ -190,6 +193,14 @@ public final class DictationController {
     private func refineOrFallback(_ text: String, language: String) async -> String {
         guard let refiner else { return text }
         let translate = translateEnabled()
+        // Interruptor "Refinar dictado con IA" (Ajustes → General, default ON).
+        // Apagado = el usuario quiere EXACTAMENTE las palabras de Whisper, sin
+        // que la IA toque nada. La traducción es un modo aparte y opt-in: si
+        // está activa, se traduce aunque el refinado esté apagado.
+        guard translate || refineEnabled() else {
+            KikiLog.log("kiki core: refinado desactivado — uso texto crudo")
+            return text
+        }
         // Fragmentos cortos no tienen muletillas que limpiar y el LLM
         // pequeño los daña — evidencia de campo: "Necesito que transcribas"
         // (24 chars) volvió "transcribas"; "¿Qué escuchas?" volvió
@@ -238,6 +249,15 @@ public final class DictationController {
             // crudo de Whisper.
             guard Double(trimmedRefined.count) <= Double(text.count) * maxRatio + Double(maxSlack) else {
                 KikiLog.log("kiki core: refinado sospechosamente largo — uso texto crudo")
+                return text
+            }
+            // Guardia de fidelidad léxica (bugfix 2026-07-08): si el refinado
+            // introduce demasiado vocabulario que el usuario no dijo, es
+            // paráfrasis/alucinación (respondió el texto en vez de limpiarlo),
+            // no una limpieza — insertar eso cambia las palabras del usuario.
+            // No aplica al traducir (cambiar el vocabulario es el objetivo).
+            if !translate && !RefineFidelity.isFaithful(original: text, refined: trimmedRefined) {
+                KikiLog.log("kiki core: refinado infiel (vocabulario nuevo) — uso texto crudo")
                 return text
             }
             KikiLog.log("kiki core: refinado (\(profile.rawValue), idioma \(language), traducir \(translate)) en \(String(format: "%.2f", Date().timeIntervalSince(started)))s: \"\(trimmedRefined)\"")

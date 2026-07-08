@@ -43,6 +43,38 @@ final class LLMRefinerIntegrationTests: XCTestCase {
         XCTAssertLessThan(refined.count, raw.count + 40, "el LLM agregó contenido: \(refined)")
     }
 
+    /// Bugfix de fidelidad (2026-07-08) contra el modelo real. Caso exacto de
+    /// campo: "Dame la lista de repositorios ya automatizados" salía como
+    /// "Lista de repositorios automatizados:" — el refinador cambió la orden
+    /// (imperativo) por un encabezado, dropeando el verbo. El prompt nuevo
+    /// (corrección mínima + ejemplo) debe conservar el imperativo y las
+    /// palabras, quitando solo la muletilla inicial.
+    func test_refinementIsFaithfulToImperative() async throws {
+        try XCTSkipUnless(
+            ProcessInfo.processInfo.environment["KIKI_LLM_TEST"] == "1",
+            "gated: exportar KIKI_LLM_TEST=1 (descarga el modelo, ~1.8GB)")
+
+        let refiner = LLMRefiner()
+        try await refiner.prepare()
+
+        let raw = "eh dame la lista de repositorios ya automatizados"
+        let refined = try await refiner.refine(raw, profile: .code)
+        let lower = refined.lowercased()
+        print("kiki test evidence — test_refinementIsFaithfulToImperative output: \"\(refined)\"")
+
+        // El verbo/imperativo debe sobrevivir (era exactamente lo que se perdía).
+        XCTAssertTrue(lower.contains("dame"), "el imperativo 'dame' se perdió: \(refined)")
+        // Palabras de contenido conservadas.
+        XCTAssertTrue(lower.contains("lista"), "'lista' se perdió: \(refined)")
+        XCTAssertTrue(lower.contains("repositorios"), "'repositorios' se perdió: \(refined)")
+        XCTAssertTrue(lower.contains("automatizados"), "'automatizados' se perdió: \(refined)")
+        // Sin vocabulario nuevo (no parafraseó): la misma guardia que corre en
+        // producción debe considerarlo fiel.
+        XCTAssertTrue(
+            RefineFidelity.isFaithful(original: raw, refined: refined),
+            "el refinado introdujo vocabulario nuevo (paráfrasis): \(refined)")
+    }
+
     /// Prueba directa del contrato de FIX 1: antes, `LLMRefiner.refine` usaba
     /// `ChatSession.respond` → `MLXLMCommon.generate(input:context:iterator:)`
     /// con un callback fijo `{ _ in .more }` que nunca revisa cancelación, así

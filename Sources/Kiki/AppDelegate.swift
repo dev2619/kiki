@@ -183,7 +183,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // closure que relee `settingsViewModel.translateEnabled` en cada
             // refinado (siempre en MainActor, igual que este closure) es
             // suficiente y evita otro protocolo/adapter.
-            translateEnabled: { [weak self] in self?.settingsViewModel.translateEnabled ?? false })
+            translateEnabled: { [weak self] in self?.settingsViewModel.translateEnabled ?? false },
+            // Interruptor "Refinar dictado con IA" (default ON): mismo patrón
+            // que `translateEnabled` — closure que relee la fuente de verdad en
+            // cada refinado, sin efectos de ciclo de vida. `?? true` respeta el
+            // default ON si el settingsViewModel aún no existe.
+            refineEnabled: { [weak self] in self?.settingsViewModel.refineEnabled ?? true })
         controller.delegate = self
 
         wakeListener = WakeListener(transcriber: transcriber, speechRMSThreshold: Self.effectiveWakeRMSThreshold())

@@ -11,14 +11,24 @@ final class RefinePromptTests: XCTestCase {
         XCTAssertTrue(system.contains("ÚNICAMENTE"), "System prompt must contain 'ÚNICAMENTE'")
     }
 
-    func testBasePromptContainsIdiomaOriginal() {
+    func testBasePromptForbidsRephrasing() {
+        // Fidelidad (bugfix 2026-07-08): la regla central del nuevo prompt.
         let (system, _) = RefinePrompt.messages(for: "test", profile: .neutral)
-        XCTAssertTrue(system.contains("idioma original"), "System prompt must contain 'idioma original'")
+        XCTAssertTrue(system.contains("NO reformules"), "System prompt must forbid rephrasing")
+        XCTAssertTrue(system.contains("mismo orden"), "System prompt must require preserving word order")
     }
 
-    func testBasePromptContainsEditorDeDictado() {
+    func testBasePromptContainsCorrectorDeDictado() {
         let (system, _) = RefinePrompt.messages(for: "test", profile: .neutral)
-        XCTAssertTrue(system.contains("editor de dictado"), "System prompt must mention 'editor de dictado'")
+        XCTAssertTrue(system.contains("corrector de dictado"), "System prompt must mention 'corrector de dictado'")
+    }
+
+    func testBasePromptContainsFidelityExample() {
+        // El ejemplo concreto (el caso que falló en campo) es lo que ancla a un
+        // modelo pequeño a NO parafrasear.
+        let (system, _) = RefinePrompt.messages(for: "test", profile: .neutral)
+        XCTAssertTrue(system.contains("Ejemplo"), "System prompt must include a worked example")
+        XCTAssertTrue(system.contains("dame la lista de repositorios"), "Example must use the field failure case")
     }
 
     // MARK: - User Message
@@ -54,7 +64,7 @@ final class RefinePromptTests: XCTestCase {
         let (system, _) = RefinePrompt.messages(for: "test", profile: .code)
         XCTAssertTrue(system.contains("editor de código"), "Code profile must contain code context")
         XCTAssertTrue(system.contains("terminal"), "Code profile must mention terminal")
-        XCTAssertTrue(system.contains("Términos técnicos"), "Code profile must mention technical terms")
+        XCTAssertTrue(system.contains("términos técnicos"), "Code profile must mention technical terms")
         XCTAssertTrue(system.contains("nombres de comandos"), "Code profile must mention command names")
         XCTAssertTrue(system.contains("de librerías"), "Code profile must mention library names")
     }
@@ -62,53 +72,35 @@ final class RefinePromptTests: XCTestCase {
     func testCodeProfileIncludesBaseSuffix() {
         let (system, _) = RefinePrompt.messages(for: "test", profile: .code)
         XCTAssertTrue(system.contains("ÚNICAMENTE"), "Code profile must include base rules")
-        XCTAssertTrue(system.contains("idioma original"), "Code profile must include base rules")
+        XCTAssertTrue(system.contains("NO reformules"), "Code profile must include base fidelity rules")
     }
 
-    // MARK: - Chat Profile
+    // MARK: - Non-code profiles (fidelity: no tone suffix)
+    //
+    // Fidelidad (bugfix 2026-07-08): chat/email/docs ya NO agregan sufijo de
+    // tono — "adaptar el tono" empujaba al modelo a parafrasear. Solo `code`
+    // conserva un hint (y acotado a NO alterar términos técnicos). Los demás
+    // perfiles se comportan como neutral: solo las reglas de limpieza base.
 
-    func testChatProfileHasChatSuffix() {
+    func testChatProfileHasNoToneSuffix() {
         let (system, _) = RefinePrompt.messages(for: "test", profile: .chat)
-        XCTAssertTrue(system.contains("chat informal"), "Chat profile must contain chat context")
-        XCTAssertTrue(system.contains("Tono conversacional"), "Chat profile must mention conversational tone")
-        XCTAssertTrue(system.contains("conciso"), "Chat profile must mention conciseness")
+        XCTAssertFalse(system.contains("chat informal"), "Chat profile must not add a tone suffix anymore")
+        XCTAssertFalse(system.contains("conversacional"), "Chat profile must not steer tone (invites paraphrasing)")
+        XCTAssertTrue(system.contains("ÚNICAMENTE"), "Chat profile must still include base rules")
     }
 
-    func testChatProfileIncludesBaseSuffix() {
-        let (system, _) = RefinePrompt.messages(for: "test", profile: .chat)
-        XCTAssertTrue(system.contains("ÚNICAMENTE"), "Chat profile must include base rules")
-        XCTAssertTrue(system.contains("idioma original"), "Chat profile must include base rules")
-    }
-
-    // MARK: - Email Profile
-
-    func testEmailProfileHasEmailSuffix() {
+    func testEmailProfileHasNoToneSuffix() {
         let (system, _) = RefinePrompt.messages(for: "test", profile: .email)
-        XCTAssertTrue(system.contains("correo profesional"), "Email profile must contain email context")
-        XCTAssertTrue(system.contains("Tono claro"), "Email profile must mention clear tone")
-        XCTAssertTrue(system.contains("cortés"), "Email profile must mention courtesy")
-        XCTAssertTrue(system.contains("frases completas"), "Email profile must mention complete sentences")
+        XCTAssertFalse(system.contains("correo profesional"), "Email profile must not add a tone suffix anymore")
+        XCTAssertFalse(system.contains("cortés"), "Email profile must not steer tone (invites paraphrasing)")
+        XCTAssertTrue(system.contains("ÚNICAMENTE"), "Email profile must still include base rules")
     }
 
-    func testEmailProfileIncludesBaseSuffix() {
-        let (system, _) = RefinePrompt.messages(for: "test", profile: .email)
-        XCTAssertTrue(system.contains("ÚNICAMENTE"), "Email profile must include base rules")
-        XCTAssertTrue(system.contains("idioma original"), "Email profile must include base rules")
-    }
-
-    // MARK: - Docs Profile
-
-    func testDocsProfileHasDocsSuffix() {
+    func testDocsProfileHasNoToneSuffix() {
         let (system, _) = RefinePrompt.messages(for: "test", profile: .docs)
-        XCTAssertTrue(system.contains("documento"), "Docs profile must contain document context")
-        XCTAssertTrue(system.contains("Prosa clara"), "Docs profile must mention clear prose")
-        XCTAssertTrue(system.contains("bien estructurada"), "Docs profile must mention well-structured")
-    }
-
-    func testDocsProfileIncludesBaseSuffix() {
-        let (system, _) = RefinePrompt.messages(for: "test", profile: .docs)
-        XCTAssertTrue(system.contains("ÚNICAMENTE"), "Docs profile must include base rules")
-        XCTAssertTrue(system.contains("idioma original"), "Docs profile must include base rules")
+        XCTAssertFalse(system.contains("Prosa"), "Docs profile must not add a tone suffix anymore")
+        XCTAssertFalse(system.contains("bien estructurada"), "Docs profile must not steer structure (invites paraphrasing)")
+        XCTAssertTrue(system.contains("ÚNICAMENTE"), "Docs profile must still include base rules")
     }
 
     // MARK: - System Prompt Structure
@@ -118,29 +110,29 @@ final class RefinePromptTests: XCTestCase {
         let (system, _) = RefinePrompt.messages(for: baseText, profile: .code)
 
         // Should start with the main instruction
-        XCTAssertTrue(system.contains("editor de dictado"), "Should contain main instruction")
+        XCTAssertTrue(system.contains("corrector de dictado"), "Should contain main instruction")
 
         // Should contain all base rules
-        XCTAssertTrue(system.contains("corrige puntuación"), "Should contain punctuation rule")
+        XCTAssertTrue(system.contains("puntuación"), "Should contain punctuation rule")
         XCTAssertTrue(system.contains("mayúsculas"), "Should contain capitalization rule")
         XCTAssertTrue(system.contains("muletillas"), "Should contain filler removal rule")
         XCTAssertTrue(system.contains("falsos comienzos"), "Should contain false start rule")
-        XCTAssertTrue(system.contains("une frases cortadas"), "Should contain phrase joining rule")
     }
 
     func testSystemPromptContainsRestrictions() {
         let (system, _) = RefinePrompt.messages(for: "test", profile: .neutral)
 
-        XCTAssertTrue(system.contains("NO agregues contenido"), "Should contain no addition rule")
+        XCTAssertTrue(system.contains("NO resumas"), "Should forbid summarizing")
+        XCTAssertTrue(system.contains("NO reordenes"), "Should forbid reordering")
         XCTAssertTrue(system.contains("NO respondas preguntas"), "Should contain no answer rule")
-        XCTAssertTrue(system.contains("NO expliques"), "Should contain no explanation rule")
+        XCTAssertTrue(system.contains("NO inventes"), "Should forbid inventing headings/colons")
     }
 
     func testSystemPromptContainsMetaUtteranceRule() {
         let (system, _) = RefinePrompt.messages(for: "test", profile: .neutral)
         XCTAssertTrue(
-            system.contains("SIEMPRE una transcripción"),
-            "System prompt must instruct the model that the user message is always dictation to rewrite, never a question/instruction to the model")
+            system.contains("SIEMPRE es una transcripción"),
+            "System prompt must instruct the model that the user message is always dictation to clean, never a question/instruction to the model")
     }
 
     // MARK: - All Profiles Coverage
@@ -153,7 +145,7 @@ final class RefinePromptTests: XCTestCase {
 
             XCTAssertFalse(system.isEmpty, "System prompt for \(profile) should not be empty")
             XCTAssertEqual(user, testText, "User message for \(profile) should match input")
-            XCTAssertTrue(system.contains("editor de dictado"), "\(profile) should contain main instruction")
+            XCTAssertTrue(system.contains("corrector de dictado"), "\(profile) should contain main instruction")
         }
     }
 
@@ -254,17 +246,14 @@ final class RefinePromptTests: XCTestCase {
         // A small model drifts less from the target output language when the
         // whole instruction is already in that language, not just the pin.
         let (system, _) = RefinePrompt.messages(for: "test", profile: .neutral, language: "en")
-        XCTAssertTrue(system.contains("dictation editor"), "English prompt must be written in English, not just append an English pin to the Spanish prompt")
-        XCTAssertFalse(system.contains("editor de dictado"), "English prompt must not contain the Spanish base instruction")
+        XCTAssertTrue(system.contains("dictation corrector"), "English prompt must be written in English, not just append an English pin to the Spanish prompt")
+        XCTAssertFalse(system.contains("corrector de dictado"), "English prompt must not contain the Spanish base instruction")
     }
 
-    func testEnglishProfileSuffixesAreInEnglish() {
+    func testEnglishCodeSuffixIsInEnglish() {
         let (codeSystem, _) = RefinePrompt.messages(for: "test", profile: .code, language: "en")
         XCTAssertTrue(codeSystem.contains("code editor/terminal"))
         XCTAssertFalse(codeSystem.contains("editor de código"))
-
-        let (chatSystem, _) = RefinePrompt.messages(for: "test", profile: .chat, language: "en")
-        XCTAssertTrue(chatSystem.contains("casual chat"))
     }
 
     func testEnglishDictionaryTermsUseEnglishHeader() {
@@ -298,7 +287,7 @@ final class RefinePromptTests: XCTestCase {
         // Translate is a distinct mode, not refine-plus-pin: the cleanup
         // rules/meta-utterance guard from the refine prompt should not leak in.
         let (system, _) = RefinePrompt.messages(for: "hola", profile: .neutral, language: "es", translate: true)
-        XCTAssertFalse(system.contains("editor de dictado"))
+        XCTAssertFalse(system.contains("corrector de dictado"))
         XCTAssertFalse(system.contains("NUNCA traduzcas"), "Translate mode must not carry the 'never translate' refine pin")
     }
 
