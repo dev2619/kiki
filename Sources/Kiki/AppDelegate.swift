@@ -409,15 +409,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     ///
     /// `armDirectly()` comparte la misma precondición que `start()` (guard
     /// `_state == .stopped` en `WakeListener`). Por el ruteo de arriba,
-    /// `armViaShortcut()` solo corre con `wakeEnabled` en OFF, así que
-    /// `wakeListener` debería estar siempre `.stopped` en este punto (nunca
-    /// se arrancó, o `toggleWake()`/`wakeStartFailed()` ya lo pararon) — el
-    /// `stop()` defensivo de abajo solo cubre un desync wakeEnabled/listener
-    /// que no debería ocurrir por construcción (ver paranoia equivalente en
-    /// `wakeStartFailed`), pero dejarlo sin cubrir significaría que
-    /// `armDirectly()` se ignoraría en silencio (log "ya activo") y el
-    /// usuario quedaría con el modo recién encendido pero SIN arme — peor
-    /// que el costo de un `stop()` de más.
+    /// `armViaShortcut()` solo corre con `wakeEnabled` en OFF — pero con
+    /// `alwaysListening` en su default `true`, el listener normalmente YA está
+    /// corriendo en `.listening` (arrancado en `markReady`) cuando se pulsa
+    /// ⌥⌘K, así que el `stop()` de abajo es ahora el caso COMÚN (baja de
+    /// `.listening` a `.stopped` para que `armDirectly()` pueda re-armar
+    /// fresco), no una rareza. Con `alwaysListening` en OFF sí es el caso raro
+    /// (el listener suele estar `.stopped` ya) y el `stop()` solo cubre un
+    /// desync wakeEnabled/listener. En ambos casos, sin el `stop()`,
+    /// `armDirectly()` se ignoraría en silencio (log "ya activo") y el usuario
+    /// quedaría con el modo recién encendido pero SIN arme — peor que el costo
+    /// de un `stop()` de más.
     ///
     /// A diferencia de `arm()` (armado por frase, dentro de `WakeListener`),
     /// `armDirectly()` NO dispara `wakeListenerDidArm()` — esa notificación
@@ -469,11 +471,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// arranca/para `wakeListener` para que el toggle de Ajustes tenga efecto
     /// inmediato sin esperar al próximo ciclo de pausa/resume del hotkey.
     ///
-    /// Si hay un dictado en curso (`wakePausedByDictation`, el listener ya
-    /// está parado por `dictationStateDidChange`), no se toca el engine
-    /// aquí — el propio resume al volver a `.idle` releerá `alwaysListening`
-    /// (ya actualizado arriba) y decidirá correctamente sin crear una carrera
-    /// entre este handler y la pausa por dictado.
+    /// Si hay un dictado por HOTKEY en curso (`wakePausedByDictation`, el
+    /// listener ya está parado por `dictationStateDidChange`), no se toca el
+    /// engine aquí — el propio resume al volver a `.idle` releerá
+    /// `alwaysListening` (ya actualizado arriba) y decidirá correctamente sin
+    /// crear una carrera entre este handler y la pausa por dictado. OJO: ese
+    /// guard NO cubre una sesión manos-libres `.armed` (abierta por la frase);
+    /// la rama OFF de abajo la maneja con `stopAndFlush()` — ver ahí.
     @MainActor private func handleAlwaysListeningChanged() {
         let key = SettingsViewModel.alwaysListeningDefaultsKey
         let defaults = UserDefaults.standard
@@ -492,11 +496,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             updateStatusIcon()
         } else if !wakeEnabled {
             // Apagado y `wakeEnabled` también OFF: nada más quiere el
-            // listener corriendo — a diferencia de `toggleWake`, aquí no hay
-            // dictado en curso que volcar (ver guard de arriba), así que
-            // `stop()` liso basta (mismo criterio que la coordinación de
-            // pausa por hotkey, no `stopAndFlush()`).
-            wakeListener.stop()
+            // listener corriendo. El guard de `wakePausedByDictation` de
+            // arriba solo descarta una pausa por HOTKEY — NO una sesión
+            // manos-libres `.armed` abierta por la frase (que con
+            // `alwaysListening` ON puede existir con `wakeEnabled` en OFF).
+            // Por eso `stopAndFlush()` (no `stop()` liso), igual que la rama
+            // OFF de `toggleWake`: apagar la escucha siempre activa es un
+            // "ya terminé" del usuario, así que se vuelca el dictado en curso
+            // en vez de perderlo, y se limpia la pill "Te escucho…"/
+            // "Escuchando…" que si no quedaría pegada para siempre (ambos
+            // flags en OFF → ningún camino futuro la limpiaría).
+            wakeListener.stopAndFlush()
+            hud.showArmed(false)
+            if controller.state == .idle { hud.show(state: .idle) }
             updateStatusIcon()
         }
     }
