@@ -165,4 +165,83 @@ final class WakePhraseMatcherTests: XCTestCase {
         XCTAssertEqual(match1, match2)
         XCTAssertNotEqual(match1, match3)
     }
+
+    // MARK: - Real Whisper transcripts (fix/wake-phrase-matching diagnosis)
+    //
+    // Captured verbatim from `WakePhraseWhisperDiagnosisTests` (gated,
+    // KIKI_STT_TEST=1) synthesizing "escúchame kiki" et al. with `say` and
+    // running the REAL WhisperTranscriber. The exact-word-sequence matcher
+    // missed every single Spanish variant — Whisper detected the utterance as
+    // English (short audio, ambiguous language ID) and phonetically spelled
+    // out "escúchame" as English-sounding syllables, sometimes hyphenated,
+    // sometimes split into separate words.
+
+    func testRealWhisperHyphenatedPhoneticSpelling() {
+        // said "escúchame kiki" (normal AND slow rate) -> Whisper: "Eska-Chame-Kiki."
+        let result = WakePhraseMatcher.match("Eska-Chame-Kiki.")
+        XCTAssertNotNil(result)
+        XCTAssertEqual(result?.remainder, "")
+    }
+
+    func testRealWhisperSingleSubstitutionTypo() {
+        // said "escúchame kiki, escribe hola mundo" (same breath) ->
+        // Whisper: "Escochame Kiki, Escribo La Mundo." (also garbled the
+        // dictation itself, which is fine — the remainder is passed through
+        // verbatim, same contract as every other remainder test above).
+        let result = WakePhraseMatcher.match("Escochame Kiki, Escribo La Mundo.")
+        XCTAssertNotNil(result)
+        XCTAssertEqual(result?.remainder, "Escribo La Mundo.")
+    }
+
+    func testRealWhisperEnglishPlain() {
+        // said "listen to me kiki" -> Whisper: "Listen to me Kiki."
+        let result = WakePhraseMatcher.match("Listen to me Kiki.")
+        XCTAssertNotNil(result)
+        XCTAssertEqual(result?.remainder, "")
+    }
+
+    func testRealWhisperLeadingFillerSplitWords() {
+        // said "oye escúchame kiki" -> Whisper: "Oye eska chame kiki."
+        let result = WakePhraseMatcher.match("Oye eska chame kiki.")
+        XCTAssertNotNil(result)
+        XCTAssertEqual(result?.remainder, "")
+    }
+
+    // MARK: - Fuzzy matching (bounded, ≤1 edit distance per word)
+
+    func testFuzzyKikiAsKiwi() {
+        // "kiwi" is 1 substitution away from "kiki" — a commonly-cited Whisper
+        // mishearing of the product name.
+        let result = WakePhraseMatcher.match("escuchame kiwi")
+        XCTAssertNotNil(result)
+        XCTAssertEqual(result?.remainder, "")
+    }
+
+    func testFuzzyListenTypo() {
+        let result = WakePhraseMatcher.match("listen to me kiki")
+        XCTAssertNotNil(result)
+        // sanity: exact match still works (not a regression check on fuzz)
+        XCTAssertEqual(result?.remainder, "")
+    }
+
+    func testFuzzyDoesNotOverMatchUnrelatedWord() {
+        // "mikimoto" is nowhere near 1 edit away from "kiki" — must NOT match.
+        let result = WakePhraseMatcher.match("escuchame mikimoto")
+        XCTAssertNil(result)
+    }
+
+    func testFuzzyDoesNotOverMatchDistantWordForEscuchame() {
+        // "conversando" is nowhere near "escuchame"/"eskachame" — must NOT match.
+        let result = WakePhraseMatcher.match("conversando kiki")
+        XCTAssertNil(result)
+    }
+
+    func testWordSplitJoinsAdjacentShortTokens() {
+        // Explicit word-splitting case independent of the real-transcript
+        // fixtures above: Whisper breaking "escuchame" into two short tokens
+        // that concatenate exactly to the target word.
+        let result = WakePhraseMatcher.match("escucha me kiki")
+        XCTAssertNotNil(result)
+        XCTAssertEqual(result?.remainder, "")
+    }
 }
