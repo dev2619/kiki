@@ -57,6 +57,14 @@ Todo ocurre en tu Mac. La transcripción (Whisper) y el refinado (un LLM local) 
 - **Guía de publicación** — [`docs/RELEASE.md`](docs/RELEASE.md)
 - **Marca / logos** — [`docs/brand/`](docs/brand/)
 
+## 📄 Licencia
+
+kiki se distribuye bajo la **[Business Source License 1.1](LICENSE)** (BSL 1.1) — código *source-available*:
+
+- ✅ **Uso personal, educativo, de evaluación y no comercial:** libre. Puedes descargar, usar, estudiar, modificar y redistribuir.
+- 💼 **Uso comercial:** requiere una licencia comercial del autor (contacto vía [issues del repo](https://github.com/dev2619/kiki/issues)).
+- ⏳ **Change Date — 2030-07-08:** en esa fecha (o a los 4 años de publicar cada versión, lo que ocurra primero) el código pasa automáticamente a **Apache 2.0**.
+
 ---
 
 <p align="center"><sub>kiki — dictado por voz privado para macOS · <a href="https://github.com/dev2619/kiki/releases/latest">Descargar</a></sub></p>
