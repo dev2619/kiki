@@ -195,6 +195,12 @@ private struct GeneralSectionView: View {
                 Text("Con esto activado, kiki traduce cada dictado al otro idioma (español↔inglés) en vez de solo limpiarlo. Con esto desactivado (por defecto), kiki nunca cambia el idioma en el que dictaste.")
             }
 
+            Section {
+                Toggle("Restaurar clipboard anterior tras dictar", isOn: $viewModel.restoreClipboardAfterDictation)
+            } footer: {
+                Text("Con esto desactivado (por defecto), el texto dictado queda en tu portapapeles después de insertarse — listo para pegarlo con ⌘V en cualquier otro lado. Actívalo si prefieres que kiki devuelva al portapapeles lo que tenías copiado antes de dictar.")
+            }
+
             Section("Dictado") {
                 LabeledContent("Atajo", value: viewModel.hotkeyDescription)
                 LabeledContent("Frases de activación", value: viewModel.wakePhrasesDescription)

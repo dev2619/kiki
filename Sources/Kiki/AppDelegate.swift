@@ -162,7 +162,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         controller = DictationController(
             recorder: recorder,
             transcriber: transcriber,
-            inserter: PasteInserter(),
+            inserter: PasteInserter(restoresClipboard: {
+                UserDefaults.standard.bool(forKey: SettingsViewModel.restoreClipboardDefaultsKey)
+            }),
             refiner: refiner,
             context: appContext,
             snippets: snippetAdapter,

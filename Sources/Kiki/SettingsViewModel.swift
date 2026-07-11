@@ -163,6 +163,23 @@ final class SettingsViewModel: ObservableObject {
     /// `AppDelegate.effectiveAlwaysListening()` la lee fuera de MainActor.
     nonisolated static let alwaysListeningDefaultsKey = "kiki.alwaysListening"
 
+    /// F2 (spec 2026-07-11): tras dictar, la transcripción queda en el
+    /// clipboard por defecto. Este toggle opt-in restaura el contenido
+    /// anterior del clipboard ~0.4s después del paste (comportamiento
+    /// pre-0.9.2). Sin efectos de ciclo de vida: `PasteInserter` lee la
+    /// preferencia en cada insert vía closure, así que el cambio aplica
+    /// en caliente sin notificaciones.
+    @Published var restoreClipboardAfterDictation: Bool {
+        didSet {
+            UserDefaults.standard.set(
+                restoreClipboardAfterDictation, forKey: Self.restoreClipboardDefaultsKey)
+        }
+    }
+
+    /// `nonisolated`: `AppDelegate` construye el `PasteInserter` (y su
+    /// closure lee esta key) fuera del init de SettingsViewModel.
+    nonisolated static let restoreClipboardDefaultsKey = "kiki.restoreClipboard"
+
     /// Cap configurable del Historial (Ajustes → Historial, control
     /// "cantidad a conservar"), default 200 — mismo default que
     /// `HistoryStore.init(cap:)`. El `didSet` es la única fuente de escritura
@@ -232,6 +249,8 @@ final class SettingsViewModel: ObservableObject {
         self.alwaysListening = defaults.object(forKey: Self.alwaysListeningDefaultsKey) != nil
             ? defaults.bool(forKey: Self.alwaysListeningDefaultsKey)
             : true
+        self.restoreClipboardAfterDictation =
+            UserDefaults.standard.bool(forKey: Self.restoreClipboardDefaultsKey)
         // `integer(forKey:)` devuelve 0 cuando la clave está ausente — un cap
         // de 0 no tiene sentido, así que se trata como "sin configurar" y cae
         // al default 200 (mismo default que `HistoryStore.init(cap:)`).
