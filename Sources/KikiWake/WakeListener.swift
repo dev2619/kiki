@@ -183,6 +183,10 @@ public final class WakeListener: @unchecked Sendable {
     /// bump de `session` en `start()`/`resumeArmed()`) para que un segmento
     /// de un régimen o sesión anteriores nunca se cuele en el siguiente.
     private var pendingSegment: [Float]?
+    /// Verificador dedicado de la frase de activación (tiny, F4). `nil` =
+    /// verificar con `transcriber` (comportamiento pre-F4 y fallback si el
+    /// tiny no cargó). Confinado a `queue` como el resto del estado.
+    private var wakeVerifier: Transcribing?
     private var transcriptionTask: Task<Void, Never>?
     private var disarmTask: Task<Void, Never>?
     /// Incrementado en cada start()/stop(). Las tareas de transcripción en
@@ -588,6 +592,15 @@ public final class WakeListener: @unchecked Sendable {
         }
     }
 
+    /// Instala (o quita, con `nil`) el verificador dedicado de la frase de
+    /// activación (F4, tiny). Task 3 lo llama desde `AppDelegate` apenas el
+    /// modelo tiny termina de cargar. `queue.sync` — mismo patrón que el
+    /// resto de los métodos públicos — para que el estado quede confinado a
+    /// `queue` y el caller observe el efecto antes de retornar.
+    public func setWakeVerifier(_ verifier: Transcribing?) {
+        queue.sync { self.wakeVerifier = verifier }
+    }
+
     // MARK: - Tap handling (confinado a `queue`)
 
     private func handle(chunk: [Float], rms: Float) {
@@ -713,7 +726,16 @@ public final class WakeListener: @unchecked Sendable {
             return
         }
         isTranscribing = true
-        let transcriber = self.transcriber
+        // F4: el tiny (si está instalado vía `setWakeVerifier`) reemplaza al
+        // transcriber principal SOLO para este check de verificación — más
+        // rápido, pero de calidad insuficiente para dictado real. `nil` =
+        // comportamiento pre-F4 (verificar con el principal). `usedVerifier`
+        // se captura AHORA, sobre `queue`, para que el call-site de
+        // `applyMatch` (varios saltos de Task después) sepa sin releer
+        // estado mutable si el texto que está verificando vino del tiny —
+        // determina si el remainder amerita re-verificación same-breath.
+        let transcriber = self.wakeVerifier ?? self.transcriber
+        let usedVerifier = self.wakeVerifier != nil
         let segmentSeconds = Double(samples.count) / Self.sampleRate
         // Fence de sesión: si hay un stop()+start() mientras esta tarea está
         // en vuelo, `session` cambia y el resultado se descarta al volver,
@@ -765,7 +787,7 @@ public final class WakeListener: @unchecked Sendable {
                 let matched = text.flatMap(WakePhraseMatcher.match) != nil
                 KikiLog.log("kiki wake: check — segmento \(String(format: "%.1f", segmentSeconds))s, transcripción \(String(format: "%.1f", transcribeSeconds))s, match \(matched ? "sí" : "no")")
                 if self._state == .listening, let text {
-                    self.applyMatch(text, language: detectedLanguage, sampleCount: samples.count)
+                    self.applyMatch(text, language: detectedLanguage, samples: samples, usedVerifier: usedVerifier)
                 }
                 // Un segmento pudo haber quedado pendiente (ver
                 // `handleListeningSegment`) mientras este check estaba en
@@ -783,12 +805,12 @@ public final class WakeListener: @unchecked Sendable {
         }
     }
 
-    private func applyMatch(_ text: String, language: String, sampleCount: Int) {
+    private func applyMatch(_ text: String, language: String, samples: [Float], usedVerifier: Bool) {
         dispatchPrecondition(condition: .onQueue(queue))
         guard let match = WakePhraseMatcher.match(text) else {
             // Regla de privacidad: NO se loggea el contenido de segmentos sin
             // match (conversación ajena a kiki), solo duración.
-            let seconds = Double(sampleCount) / Self.sampleRate
+            let seconds = Double(samples.count) / Self.sampleRate
             KikiLog.log("kiki wake: segmento descartado (sin frase, \(String(format: "%.1f", seconds))s)")
             return
         }
@@ -796,6 +818,15 @@ public final class WakeListener: @unchecked Sendable {
         KikiLog.log("kiki wake: frase detectada: \"\(text)\"")
         if match.remainder.isEmpty {
             arm()
+        } else if usedVerifier {
+            // F4: el tiny detectó frase+remainder, pero su texto no tiene
+            // calidad de dictado — re-verificar con el principal antes de
+            // entregar nada (ver `reverifySameBreath`). La máquina de estados
+            // no cambia aquí: el camino pre-F4 (rama `else` de abajo) tampoco
+            // toca `_state` en este punto, así que no hay transición que
+            // replicar — solo cambia qué texto se entrega, y solo tras la
+            // re-verificación.
+            reverifySameBreath(samples)
         } else {
             // notifyCapture — mismo razonamiento que en handleSegmentEnded:
             // el remainder es dictado real dicho en el mismo aliento que la
@@ -803,6 +834,44 @@ public final class WakeListener: @unchecked Sendable {
             // haya un stop() concurrente; el token de frescura le permite al
             // delegate no rearmar el mic si la sesión ya no es la vigente.
             notifyCapture { $0.wakeListenerDidCaptureSameBreath(text: match.remainder, language: language, sessionIsCurrent: $1) }
+        }
+    }
+
+    /// F4: el tiny detectó frase+remainder en el mismo aliento. Su texto no
+    /// tiene calidad de dictado, así que el segmento completo se
+    /// re-transcribe con el transcriber principal y se entrega SU remainder.
+    /// Si el principal no reconoce la frase (transcribió distinto), se
+    /// entrega su texto completo: el tiny ya estableció que el usuario se
+    /// dirigía a kiki, y perder dictado es peor que un prefijo imperfecto.
+    private func reverifySameBreath(_ samples: [Float]) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        let transcriber = self.transcriber
+        let capturedSession = session
+        Task {
+            var detectedLanguage = "es"
+            let started = Date()
+            let text: String?
+            do {
+                text = try await transcriber.transcribe(samples)
+                if let languageDetecting = transcriber as? LanguageDetecting {
+                    detectedLanguage = await languageDetecting.detectedLanguage()
+                }
+            } catch {
+                KikiLog.log("kiki wake: re-verificación same-breath falló (\(error))")
+                text = nil
+            }
+            let seconds = Date().timeIntervalSince(started)
+            self.queue.async {
+                guard capturedSession == self.session else { return }
+                guard let text, !text.isEmpty else { return }
+                KikiLog.log("kiki wake: same-breath re-verificado en \(String(format: "%.1f", seconds))s")
+                let delivered = WakePhraseMatcher.match(text)?.remainder ?? text
+                let language = detectedLanguage
+                self.notifyCapture {
+                    $0.wakeListenerDidCaptureSameBreath(
+                        text: delivered, language: language, sessionIsCurrent: $1)
+                }
+            }
         }
     }
 
