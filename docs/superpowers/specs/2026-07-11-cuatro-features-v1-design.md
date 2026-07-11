@@ -21,8 +21,8 @@ Cuatro features independientes, cada una con su propio ciclo plan→implementaci
 
 **Comportamiento (nuevo default):** al dictar, el texto se inserta en el cursor Y queda en el portapapeles. El restore del clipboard anterior (hoy `restoreDelay` 0.4s en `PasteInserter`) se omite.
 
-- `PasteInserter` gana `keepInClipboard: Bool` (default `true`): con `true`, no se agenda el restore del snapshot post-paste.
-- Settings: toggle **"Restaurar clipboard anterior tras dictar"** (OFF por defecto) — patrón existente `SettingsViewModel` @Published + UserDefaults (key `kikiRestoreClipboard`).
+- `PasteInserter` gana `restoresClipboard: () -> Bool` (default `{ false }` = la transcripción queda), evaluado en cada insert para que el toggle aplique en caliente. [Ajustado en implementación: closure en vez de `keepInClipboard: Bool` fijo.]
+- Settings: toggle **"Restaurar clipboard anterior tras dictar"** (OFF por defecto) — patrón existente `SettingsViewModel` @Published + UserDefaults (key `kiki.restoreClipboard`, naming `kiki.*` del resto de keys).
 - Consistencia: en fallo de paste el texto ya quedaba en clipboard; ahora el comportamiento es uniforme.
 - Tests: unit de `PasteInserter` con pasteboard nombrado — con flag ON restaura, con flag OFF (default) la transcripción persiste.
 
