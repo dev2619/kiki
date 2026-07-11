@@ -65,6 +65,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private(set) var controller: DictationController!
     let recorder = AudioRecorder()
     let transcriber = WhisperTranscriber()
+    /// Verificador tiny de la frase de activación (F4). Se prepara en
+    /// background DESPUÉS de los modelos principales (75MB, sin UI de
+    /// progreso); hasta que está listo — o si falla — WakeListener verifica
+    /// con `transcriber` (fallback = comportamiento pre-F4).
+    let wakeTranscriber = WhisperTranscriber(model: WhisperTranscriber.wakeModel)
+    /// Retención fuerte del bias provider del tiny (el transcriber lo guarda
+    /// weak — mismo patrón que los adapters de personalización).
+    private let wakePhraseBias = WakePhraseBiasProvider()
     let refiner = LLMRefiner()
     let appContext = FrontmostAppContext()
     private var hotkey: HotkeyMonitor!
@@ -599,6 +607,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             } catch {
                 KikiLog.log("kiki: error cargando modelo de refinado LLM: \(error)")
                 await MainActor.run { self.markReady(refinementAvailable: false) }
+            }
+
+            // F4: el tiny del wake se carga al final, sin bloquear el arranque
+            // ni la UI de progreso. El listener ya funciona con el modelo
+            // grande mientras tanto.
+            do {
+                await self.wakeTranscriber.setDictionaryProvider(self.wakePhraseBias)
+                try await self.wakeTranscriber.prepare()
+                self.wakeListener.setWakeVerifier(self.wakeTranscriber)
+                KikiLog.log("kiki wake: verificador tiny activo (con prompt-bias)")
+            } catch {
+                KikiLog.log("kiki wake: tiny no cargó (\(error)); se sigue verificando con el modelo principal")
             }
         }
     }
