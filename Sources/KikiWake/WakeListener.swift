@@ -843,6 +843,22 @@ public final class WakeListener: @unchecked Sendable {
     /// Si el principal no reconoce la frase (transcribió distinto), se
     /// entrega su texto completo: el tiny ya estableció que el usuario se
     /// dirigía a kiki, y perder dictado es peor que un prefijo imperfecto.
+    ///
+    /// ## Ordering arm-then-capture (decisión 2026-07-11)
+    /// La re-verificación vuela fuera de `queue` mientras el listener sigue
+    /// procesando segmentos: si un segmento posterior arma la sesión
+    /// (`arm()` no avanza `session`), este capture puede entregarse DESPUÉS
+    /// del `wakeListenerDidArm`, con la sesión aún vigente — un ordering
+    /// imposible pre-F4. Es deliberado: el texto es dictado real del usuario
+    /// y perderlo es peor que entregarlo tarde; el handler de AppDelegate no
+    /// depende del estado del listener para procesar same-breath.
+    ///
+    /// ## Supuesto de serialización
+    /// No marca `isTranscribing`: puede solaparse con el check de un segmento
+    /// nuevo. Es seguro porque `WhisperTranscriber` serializa internamente
+    /// todas sus `transcribe()` encadenándolas (ver su doc "Serialización");
+    /// un `Transcribing` alternativo que no serialice solo degradaría
+    /// latencia, nunca el orden de entrega (fence de sesión + notifyCapture).
     private func reverifySameBreath(_ samples: [Float]) {
         dispatchPrecondition(condition: .onQueue(queue))
         let transcriber = self.transcriber
@@ -863,7 +879,10 @@ public final class WakeListener: @unchecked Sendable {
             let seconds = Date().timeIntervalSince(started)
             self.queue.async {
                 guard capturedSession == self.session else { return }
-                guard let text, !text.isEmpty else { return }
+                guard let text, !text.isEmpty else {
+                    KikiLog.log("kiki wake: re-verificación same-breath vacía, capture descartado")
+                    return
+                }
                 KikiLog.log("kiki wake: same-breath re-verificado en \(String(format: "%.1f", seconds))s")
                 let delivered = WakePhraseMatcher.match(text)?.remainder ?? text
                 let language = detectedLanguage
