@@ -1,6 +1,7 @@
 import XCTest
 import AVFoundation
 import KikiAudio
+import KikiWake
 @testable import KikiSTT
 
 /// Test de integración real (modelo Whisper + audio sintetizado con `say`).
@@ -40,6 +41,44 @@ final class WhisperTranscriberIntegrationTests: XCTestCase {
         XCTAssertTrue(
             normalized.contains("hello") && normalized.contains("test"),
             "transcripción inesperada: '\(text)'")
+    }
+
+    /// Valida la premisa de F4 end-to-end: el tiny transcribe la frase de
+    /// activación con calidad suficiente para que `WakePhraseMatcher` matchee.
+    /// Gated: KIKI_STT_TEST=1 (descarga ~75MB la primera vez).
+    func test_tinyModelDetectsWakePhrase() async throws {
+        try XCTSkipUnless(
+            ProcessInfo.processInfo.environment["KIKI_STT_TEST"] == "1",
+            "gated: exportar KIKI_STT_TEST=1 (descarga el modelo tiny)")
+
+        let wavURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("kiki-wake-fixture-\(UUID().uuidString).wav")
+        defer { try? FileManager.default.removeItem(at: wavURL) }
+
+        let say = Process()
+        say.executableURL = URL(fileURLWithPath: "/usr/bin/say")
+        // Voz es-ES del sistema para el fixture de la frase en español.
+        say.arguments = [
+            "-v", "Mónica", "-o", wavURL.path,
+            "--data-format=LEF32@16000",
+            "escúchame kiki",
+        ]
+        try say.run()
+        say.waitUntilExit()
+        XCTAssertEqual(say.terminationStatus, 0, "say falló")
+
+        let samples = try loadSamples(url: wavURL)
+        let transcriber = WhisperTranscriber(model: WhisperTranscriber.wakeModel)
+        try await transcriber.prepare()
+
+        let started = Date()
+        let text = try await transcriber.transcribe(samples)
+        let seconds = Date().timeIntervalSince(started)
+        XCTAssertNotNil(
+            WakePhraseMatcher.match(text),
+            "el tiny transcribió '\(text)' y el matcher no lo reconoció")
+        // Guardia de la promesa de latencia de F4 (holgada para CI frío).
+        XCTAssertLessThan(seconds, 2.0, "inferencia tiny tardó \(seconds)s")
     }
 
     private func loadSamples(url: URL) throws -> [Float] {

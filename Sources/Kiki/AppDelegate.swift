@@ -570,7 +570,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             do {
                 // El callback de progreso de WhisperKit (descarga HF +
                 // transiciones de `modelStateCallback` para prewarm/load,
-                // ver `WhisperTranscriber.loadPreferredModel`) puede
+                // ver `WhisperTranscriber.loadModel`) puede
                 // dispararse desde cualquier hilo — se salta a MainActor
                 // aquí antes de tocar la ventana/el menú.
                 try await self.transcriber.prepare(progressHandler: { [weak self] fraction in

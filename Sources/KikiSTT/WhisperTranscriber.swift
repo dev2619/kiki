@@ -34,6 +34,12 @@ public actor WhisperTranscriber: Transcribing, LanguageDetecting {
     /// kiki bloqueado en "Procesando…").
     public static let preferredModel = "large-v3_turbo_954MB"
 
+    /// Modelo dedicado a verificar la frase de activación (F4, spec
+    /// 2026-07-11): tiny multilingüe ~75MB, inferencia ~100-200ms. Su texto
+    /// decide si la frase se dijo; NUNCA se inserta como dictado (regla de
+    /// calidad — ver WakeListener.applyMatch).
+    public static let wakeModel = "openai_whisper-tiny"
+
     /// Presupuesto de tokens del "initial prompt" de Whisper (`DecodingOptions.promptTokens`,
     /// ver nota de API abajo). WhisperKit ya trunca internamente el prompt a
     /// `(maxTokenContext / 2) - 1` tokens (`TextDecoder.swift`), pero acotamos
@@ -232,7 +238,13 @@ public actor WhisperTranscriber: Transcribing, LanguageDetecting {
     /// usando una estructura de datos inmutable/copiada al leer.
     private weak var dictionaryProvider: DictionaryProviding?
 
-    public init() {}
+    /// Variante de whisperkit-coreml que carga esta instancia. La app usa
+    /// dos: el modelo principal de dictado (default) y el tiny del wake.
+    private let modelName: String
+
+    public init(model: String = WhisperTranscriber.preferredModel) {
+        self.modelName = model
+    }
 
     /// Inyecta (o quita, pasando `nil`) el proveedor del diccionario personal
     /// que se usará como initial prompt de Whisper. Es un método aislado al
@@ -252,7 +264,7 @@ public actor WhisperTranscriber: Transcribing, LanguageDetecting {
     /// Peso, dentro del progreso 0...1 de ESTA fase (Whisper), reservado a la
     /// descarga desde Hugging Face — el resto (0.15) se reparte entre
     /// prewarm y load, que WhisperKit no expone con granularidad de bytes o
-    /// porcentaje, solo transiciones de `ModelState` (ver `loadPreferredModel`).
+    /// porcentaje, solo transiciones de `ModelState` (ver `loadModel`).
     /// 0.85 refleja que la descarga (~1GB por red) domina el tiempo total del
     /// primer arranque frente a la compilación ANE/CoreML del prewarm
     /// (segundos a un par de minutos en frío, pero acotado en comparación).
@@ -269,13 +281,13 @@ public actor WhisperTranscriber: Transcribing, LanguageDetecting {
     public func prepare(progressHandler: (@Sendable (Double) -> Void)? = nil) async throws {
         let started = Date()
         do {
-            whisperKit = try await Self.loadPreferredModel(progressHandler: progressHandler)
-            KikiLog.log("kiki stt: modelo cargado (\(Self.preferredModel)) en \(String(format: "%.1f", Date().timeIntervalSince(started)))s")
+            whisperKit = try await loadModel(progressHandler: progressHandler)
+            KikiLog.log("kiki stt: modelo cargado (\(modelName)) en \(String(format: "%.1f", Date().timeIntervalSince(started)))s")
         } catch {
-            KikiLog.log("kiki stt: \(Self.preferredModel) no disponible (\(error)); usando modelo recomendado")
+            KikiLog.log("kiki stt: \(modelName) no disponible (\(error)); usando modelo recomendado")
             // Camino de fallback (recomendado remoto): WhisperKit no expone
             // progreso granular aquí tampoco (mismo límite de API, ver doc de
-            // `loadPreferredModel`) y es una rama rara (solo si el variant
+            // `loadModel`) y es una rama rara (solo si el variant
             // preferido no resuelve) — se reporta 1.0 directo al terminar
             // para que la fase no quede pegada por debajo de 100% en la UI.
             whisperKit = try await WhisperKit()
@@ -286,8 +298,8 @@ public actor WhisperTranscriber: Transcribing, LanguageDetecting {
     }
 
     /// Descarga (con progreso real de Hugging Face vía `WhisperKit.download`)
-    /// y luego prewarm+load el modelo preferido, reportando progreso 0...1 de
-    /// ESTA fase a `progressHandler`.
+    /// y luego prewarm+load `modelName` (el modelo de esta instancia),
+    /// reportando progreso 0...1 de ESTA fase a `progressHandler`.
     ///
     /// Separado en dos pasos en vez del atajo de un solo
     /// `WhisperKit(WhisperKitConfig(model:prewarm:))` (lo que hacía este
@@ -307,15 +319,15 @@ public actor WhisperTranscriber: Transcribing, LanguageDetecting {
     ///    `prewarmModels()`/`loadModels()` manualmente — así el callback
     ///    captura las transiciones `.prewarming → .prewarmed → .loading →
     ///    .loaded` (`ArgmaxCore/ModelState.swift`) de esta carga.
-    private static func loadPreferredModel(
+    private func loadModel(
         progressHandler: (@Sendable (Double) -> Void)?
     ) async throws -> WhisperKit {
-        let modelFolder = try await WhisperKit.download(variant: preferredModel) { progress in
-            progressHandler?(progress.fractionCompleted * downloadPhaseWeight)
+        let modelFolder = try await WhisperKit.download(variant: modelName) { progress in
+            progressHandler?(progress.fractionCompleted * Self.downloadPhaseWeight)
         }
 
         let kit = try await WhisperKit(WhisperKitConfig(
-            model: preferredModel,
+            model: modelName,
             modelFolder: modelFolder.path,
             prewarm: false,
             load: false))
@@ -324,11 +336,11 @@ public actor WhisperTranscriber: Transcribing, LanguageDetecting {
         // saltos de fase (a mitad al terminar prewarm, a 1.0 al terminar
         // load) en vez de interpolar nada — más honesto que fingir progreso
         // continuo sobre una operación que no lo reporta.
-        let prewarmLoadWeight = 1 - downloadPhaseWeight
+        let prewarmLoadWeight = 1 - Self.downloadPhaseWeight
         kit.modelStateCallback = { _, newState in
             switch newState {
             case .prewarmed:
-                progressHandler?(downloadPhaseWeight + prewarmLoadWeight * 0.5)
+                progressHandler?(Self.downloadPhaseWeight + prewarmLoadWeight * 0.5)
             case .loaded:
                 progressHandler?(1.0)
             default:
