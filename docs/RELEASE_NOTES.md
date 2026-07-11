@@ -13,7 +13,7 @@ Un modelo dedicado ultraligero (~75MB) ahora verifica la frase de activación en
 
 1. Descarga `kiki-0.10.0.dmg`, ábrelo y arrastra **kiki** a Aplicaciones.
 2. Primer arranque: **clic derecho sobre kiki.app → Abrir** (no doble clic) y confirma — el .dmg no está notarizado.
-3. La primera vez, kiki descarga los modelos (Whisper ~1 GB + tiny ~75MB + Qwen ~1.6 GB) con una barra de progreso. Requiere internet solo esa vez; después funciona 100% offline.
+3. La primera vez, kiki descarga los modelos principales (Whisper ~1 GB + Qwen ~1.6 GB) con una barra de progreso; el modelo ligero (~75MB) se descarga en segundo plano después del primer arranque, sin bloquear el uso. Requiere internet solo esa vez; después funciona 100% offline.
 4. Concede permisos de **Micrófono** y **Accesibilidad** cuando los pida.
 
 ## 💻 Requisitos
