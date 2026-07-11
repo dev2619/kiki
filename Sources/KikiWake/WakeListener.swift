@@ -857,8 +857,9 @@ public final class WakeListener: @unchecked Sendable {
     /// No marca `isTranscribing`: puede solaparse con el check de un segmento
     /// nuevo. Es seguro porque `WhisperTranscriber` serializa internamente
     /// todas sus `transcribe()` encadenándolas (ver su doc "Serialización");
-    /// un `Transcribing` alternativo que no serialice solo degradaría
-    /// latencia, nunca el orden de entrega (fence de sesión + notifyCapture).
+    /// un `Transcribing` alternativo que no serialice degradaría latencia y
+    /// podría reordenar dos re-verificaciones en vuelo de la misma sesión —
+    /// con `WhisperTranscriber` el encadenamiento interno lo previene.
     private func reverifySameBreath(_ samples: [Float]) {
         dispatchPrecondition(condition: .onQueue(queue))
         let transcriber = self.transcriber
@@ -879,12 +880,41 @@ public final class WakeListener: @unchecked Sendable {
             let seconds = Date().timeIntervalSince(started)
             self.queue.async {
                 guard capturedSession == self.session else { return }
-                guard let text, !text.isEmpty else {
+                guard let text else {
+                    // transcribe() lanzó — el error ya quedó logueado arriba
+                    // (rama `catch`); no duplicamos con el log de "vacía".
+                    return
+                }
+                guard !text.isEmpty else {
                     KikiLog.log("kiki wake: re-verificación same-breath vacía, capture descartado")
                     return
                 }
                 KikiLog.log("kiki wake: same-breath re-verificado en \(String(format: "%.1f", seconds))s")
-                let delivered = WakePhraseMatcher.match(text)?.remainder ?? text
+                let match = WakePhraseMatcher.match(text)
+                // Desacuerdo tiny/main: el tiny vio frase+remainder (por eso
+                // tomamos este camino), pero el MAIN — que manda para
+                // dictado real — puede transcribir SOLO la frase. Un
+                // remainder vacío del main NO significa "nada que decir":
+                // significa que el usuario dijo la frase y el tiny alucinó
+                // la cola. Entregar "" al delegate lo descarta en silencio
+                // (bug de campo, pre-fix: el usuario decía la frase y no
+                // pasaba nada). El fix correcto es armar, exactamente como
+                // habría pasado si el tiny nunca hubiera alucinado texto de
+                // más — ver `applyMatch`, rama `match.remainder.isEmpty`.
+                if let match, match.remainder.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    guard self._state == .listening else {
+                        KikiLog.log("kiki wake: re-verificación sin remainder pero ya no listening (state=\(self._state)), no armo")
+                        return
+                    }
+                    KikiLog.log("kiki wake: re-verificación sin remainder — armando")
+                    self.arm()
+                    return
+                }
+                let delivered = match?.remainder ?? text
+                guard !delivered.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    KikiLog.log("kiki wake: re-verificación same-breath entrega vacía, capture descartado")
+                    return
+                }
                 let language = detectedLanguage
                 self.notifyCapture {
                     $0.wakeListenerDidCaptureSameBreath(

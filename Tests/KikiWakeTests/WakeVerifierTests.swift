@@ -190,4 +190,35 @@ final class WakeVerifierTests: XCTestCase {
         XCTAssertEqual(spy.armCount, 1)
         XCTAssertEqual(mainMock.transcribeCallCount, 0)
     }
+
+    // MARK: - 6. Same-breath disagreement: main's empty remainder arms, doesn't silently drop
+
+    @MainActor
+    func test_sameBreathDisagreementWithEmptyRemainderArms() {
+        let mockTiny = MockTranscriber()
+        mockTiny.textToReturn = "escuchame kiki escribe algo"
+        let mainMock = MockTranscriber()
+        mainMock.textToReturn = "escuchame kiki"
+        let listener = WakeListener(transcriber: mainMock)
+        let spy = SpyDelegate()
+        listener.delegate = spy
+        listener.setWakeVerifier(mockTiny)
+        listener._testActivate(.listening)
+
+        let armExpectation = expectation(description: "armed after empty-remainder disagreement")
+        spy.armExpectation = armExpectation
+        feedListeningSegment(listener)
+        wait(for: [armExpectation], timeout: 2.0)
+
+        XCTAssertEqual(spy.armCount, 1)
+
+        // Negative assertion: no same-breath capture should follow — give the
+        // settle delay used elsewhere in this file for the no-match path.
+        let settle = expectation(description: "settle")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { settle.fulfill() }
+        wait(for: [settle], timeout: 1.0)
+
+        XCTAssertEqual(spy.sameBreathCalls.count, 0,
+                       "no debe entregarse texto vacío como same-breath capture")
+    }
 }
