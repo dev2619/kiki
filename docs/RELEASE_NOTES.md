@@ -1,18 +1,19 @@
-# kiki 0.9.2
+# kiki 0.10.0
 
 Dictado por voz con IA, 100% local, para macOS (Apple Silicon).
 
 ## ✨ Novedades de esta versión
 
-### La transcripción queda en tu portapapeles
-Después de dictar, el texto se inserta donde está el cursor **y queda copiado en el portapapeles** — pégalo con ⌘V en cualquier otra app sin volver a dictar.
-- Nuevo interruptor **"Restaurar clipboard anterior tras dictar"** (Ajustes): actívalo si prefieres el comportamiento anterior (kiki devolvía al portapapeles lo que tenías copiado antes de dictar).
+### "escúchame kiki" responde hasta 3× más rápido
+Un modelo dedicado ultraligero (~75MB) ahora verifica la frase de activación en ~0.2s — antes la verificaba el modelo grande de dictado (~1-2s). La latencia total frase→escucha baja de ~2-3s a **menos de 1 segundo**.
+- El dictado en el mismo aliento ("escúchame kiki, escribe…") conserva la calidad de siempre: el modelo grande sigue transcribiendo lo que dictas; el ligero solo decide si dijiste la frase.
+- Si el modelo ligero no puede cargar, kiki sigue funcionando exactamente como antes.
 
 ## 📦 Instalación
 
-1. Descarga `kiki-0.9.2.dmg`, ábrelo y arrastra **kiki** a Aplicaciones.
+1. Descarga `kiki-0.10.0.dmg`, ábrelo y arrastra **kiki** a Aplicaciones.
 2. Primer arranque: **clic derecho sobre kiki.app → Abrir** (no doble clic) y confirma — el .dmg no está notarizado.
-3. La primera vez, kiki descarga los modelos (Whisper ~1 GB + Qwen ~1.6 GB) con una barra de progreso. Requiere internet solo esa vez; después funciona 100% offline.
+3. La primera vez, kiki descarga los modelos (Whisper ~1 GB + tiny ~75MB + Qwen ~1.6 GB) con una barra de progreso. Requiere internet solo esa vez; después funciona 100% offline.
 4. Concede permisos de **Micrófono** y **Accesibilidad** cuando los pida.
 
 ## 💻 Requisitos
