@@ -43,8 +43,10 @@ final class WhisperTranscriberIntegrationTests: XCTestCase {
             "transcripción inesperada: '\(text)'")
     }
 
-    /// Valida la premisa de F4 end-to-end: el tiny transcribe la frase de
-    /// activación con calidad suficiente para que `WakePhraseMatcher` matchee.
+    /// Valida la config de PRODUCCIÓN de F4 end-to-end (AppDelegate, Task 3):
+    /// tiny + `WakePhraseBiasProvider` inyectado ANTES de `prepare()`. Sin el
+    /// prompt-bias el tiny transcribe con calidad insuficiente ("SKHAIM KIKI")
+    /// y `WakePhraseMatcher` no matchea; con bias sí matchea de forma consistente.
     /// Gated: KIKI_STT_TEST=1 (descarga ~75MB la primera vez).
     func test_tinyModelDetectsWakePhrase() async throws {
         try XCTSkipUnless(
@@ -69,6 +71,9 @@ final class WhisperTranscriberIntegrationTests: XCTestCase {
 
         let samples = try loadSamples(url: wavURL)
         let transcriber = WhisperTranscriber(model: WhisperTranscriber.wakeModel)
+        // DictionaryProviding es weak: mantener referencia fuerte local mientras dure el test.
+        let bias = WakePhraseBiasProvider()
+        await transcriber.setDictionaryProvider(bias)
         try await transcriber.prepare()
 
         let started = Date()
