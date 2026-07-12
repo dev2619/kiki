@@ -61,8 +61,8 @@ Refinado (MLX, repo `mlx-community`):
 
 Reglas:
 
-- UI por fila: nombre amigable + tamaño + estado (activo ● / descargado ✓ / descargar ⬇) + acción. Descarga usa `ModelLoadProgressModel` existente sin bloquear el dictado con el modelo activo.
-- Preferencias en UserDefaults: `kikiSTTModel`, `kikiRefineModel`. `WhisperTranscriber`/`LLMRefiner` resuelven preferencia → fallback al base si el preferido falla o no está descargado.
+- UI por fila: nombre amigable + tamaño + estado + acción. Estado real: `● Activo` | `descargando` (con progreso) | botón `Usar`. [Ajustado en implementación: se simplificó el estado intermedio "descargado ✓" del diseño original — detectar si un modelo ya está en cache local es frágil entre motores (WhisperKit y MLX no exponen una API estable de "¿está en disco?"), así que "Usar" siempre dispara la activación (que descarga si hace falta, o carga directo si ya está cacheado).] Descarga usa `ModelLoadProgressModel` existente sin bloquear el dictado con el modelo activo.
+- Preferencias en UserDefaults: `kiki.sttModel`, `kiki.refineModel`. [Ajustado en implementación: naming `kiki.*` con punto, consistente con el resto de keys existentes (`kiki.restoreClipboard`), no el `kikiSTTModel`/`kikiRefineModel` camelCase del diseño original.] `WhisperTranscriber`/`LLMRefiner` resuelven preferencia → fallback al base si el preferido falla o no está descargado.
 - **Hot-swap:** al elegir otro modelo, se carga (con prewarm — lección del bug "Procesando…" eterno) en background y se conmuta al estar listo; mientras tanto sigue el anterior.
 - El base STT (954MB) siempre se descarga en el primer arranque — garantía funcional.
 - Tests: unit del resolver preferencia/fallback; descargas reales gated por env var (patrón del test de integración STT).
