@@ -149,6 +149,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             dictionaryAdapter: dictionaryAdapter,
             snippetStore: snippetStore,
             historyStore: historyStore,
+            // F3 Task 3: la sección Modelos de Ajustes necesita invocar
+            // `switchModel` en los engines reales — se inyectan las mismas
+            // instancias que usa `DictationController` (el view model NO
+            // toca `wakeTranscriber`: su variante tiny es fija, fuera de
+            // `ModelPreference`).
+            transcriber: transcriber,
+            refiner: refiner,
             wakeEnabled: wakeEnabled,
             onToggleWake: { [weak self] in self?.toggleWake() })
         settingsWindowController = SettingsWindowController(viewModel: settingsViewModel)

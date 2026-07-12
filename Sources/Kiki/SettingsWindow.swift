@@ -142,6 +142,10 @@ struct SettingsRootView: View {
                     SnippetsSectionView(viewModel: viewModel)
                 case .history:
                     HistorySectionView(viewModel: viewModel)
+                case .models:
+                    // Vive en su propio archivo (`ModelsSettingsView.swift`)
+                    // en vez de como struct privada aquí — F3 Task 3.
+                    ModelsSettingsView(viewModel: viewModel)
                 case .about:
                     AboutSectionView()
                 }

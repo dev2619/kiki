@@ -35,6 +35,7 @@ enum SettingsSection: String, CaseIterable, Identifiable, Hashable {
     case dictionary
     case snippets
     case history
+    case models
     case about
 
     var id: String { rawValue }
@@ -45,6 +46,7 @@ enum SettingsSection: String, CaseIterable, Identifiable, Hashable {
         case .dictionary: return "Diccionario"
         case .snippets: return "Snippets"
         case .history: return "Historial"
+        case .models: return "Modelos"
         case .about: return "Acerca de"
         }
     }
@@ -55,9 +57,33 @@ enum SettingsSection: String, CaseIterable, Identifiable, Hashable {
         case .dictionary: return "character.book.closed"
         case .snippets: return "text.badge.plus"
         case .history: return "clock"
+        case .models: return "cpu"
         case .about: return "info.circle"
         }
     }
+}
+
+/// Estado de UNA fila de la sección Modelos (F3 Task 3): la opción curada del
+/// catálogo + su estado de UI (activa / descargando / progreso). Struct de
+/// valor a nivel de archivo (como `SettingsSection`) en vez de anidada en
+/// `SettingsViewModel` para que la vista pueda nombrarla sin heredar el
+/// aislamiento `@MainActor` de la clase en la declaración del tipo.
+///
+/// Nota de alcance (spec-note, YAGNI v1): NO hay estado "Descargado ✓" para
+/// modelos ya cacheados pero no activos — detectar presencia en el cache
+/// local es frágil entre motores (WhisperKit y MLX usan layouts de disco
+/// distintos y ninguno expone un API estable de "¿ya está descargado?").
+/// v1 solo distingue "● Activo" | descargando | botón "Usar" (que descarga
+/// si hace falta; el ProgressView comunica esa descarga).
+struct ModelRowState: Identifiable {
+    let option: ModelOption
+    var isActive: Bool
+    var isDownloading: Bool
+    /// Progreso 0...1 de la descarga+carga en curso (solo significativo
+    /// mientras `isDownloading` es `true`).
+    var progress: Double
+
+    var id: String { option.id }
 }
 
 /// Estado observable de la ventana de Ajustes. Marcado `@MainActor` en
@@ -80,6 +106,18 @@ final class SettingsViewModel: ObservableObject {
     @Published private(set) var snippets: [Snippet] = []
     @Published private(set) var historyEntries: [HistoryEntry] = []
     @Published private(set) var wakeEnabled: Bool
+
+    /// Filas de la sección Modelos (F3 Task 3), una lista por familia
+    /// (`ModelKind`). `private(set)`: la vista solo lee; toda mutación pasa
+    /// por `activateModel(_:kind:)`, que es quien coordina el motor real.
+    @Published private(set) var sttRows: [ModelRowState]
+    @Published private(set) var refineRows: [ModelRowState]
+
+    /// Mensaje de error de la última activación de modelo fallida, mostrado
+    /// por `ModelsSettingsView` como footer en rojo (la ventana de Ajustes no
+    /// tiene ningún patrón de error previo — este es el primero). Se limpia
+    /// al iniciar la siguiente activación.
+    @Published var modelsErrorMessage: String?
 
     /// Toggle "Sonidos de confirmación" (Ajustes → General). Espejo directo
     /// de `SoundCues.enabledDefaultsKey` — el `didSet` es la única fuente de
@@ -222,6 +260,12 @@ final class SettingsViewModel: ObservableObject {
     private let dictionaryAdapter: DictionaryAdapter
     private let snippetStore: SnippetStore
     private let historyStore: HistoryStore
+    /// Motores reales de STT/refinado (F3 Task 3), inyectados por
+    /// `AppDelegate` (su dueño fuerte) para que `activateModel` pueda invocar
+    /// `switchModel` directamente. Referencias fuertes pero sin ciclo:
+    /// ninguno de los dos engines conoce a `SettingsViewModel`.
+    private let transcriber: WhisperTranscriber
+    private let refiner: LLMRefiner
     private let onToggleWake: () -> Void
     private var dictationObserver: NSObjectProtocol?
 
@@ -229,14 +273,30 @@ final class SettingsViewModel: ObservableObject {
         dictionaryAdapter: DictionaryAdapter,
         snippetStore: SnippetStore,
         historyStore: HistoryStore,
+        transcriber: WhisperTranscriber,
+        refiner: LLMRefiner,
         wakeEnabled: Bool,
         onToggleWake: @escaping () -> Void
     ) {
         self.dictionaryAdapter = dictionaryAdapter
         self.snippetStore = snippetStore
         self.historyStore = historyStore
+        self.transcriber = transcriber
+        self.refiner = refiner
         self.wakeEnabled = wakeEnabled
         self.onToggleWake = onToggleWake
+        // `isActive` inicial desde la preferencia persistida (resuelta contra
+        // el catálogo — `effectiveModelId` ya cae al base si la preferencia es
+        // inválida), NO desde `transcriber.currentModel`/`refiner.currentModel`:
+        // ambos requieren `await` (actor / @MainActor async) y un init no debe
+        // bloquear en los engines — que además podrían seguir cargando en
+        // background en este punto del arranque. Si `prepare()` termina cayendo
+        // al modelo base por un fallo de descarga, este estado inicial puede
+        // divergir del modelo realmente cargado hasta la próxima activación —
+        // trade-off aceptado (F3 plan): la preferencia sigue siendo la
+        // intención del usuario y la fuente de verdad persistida.
+        self.sttRows = Self.initialRows(for: .stt)
+        self.refineRows = Self.initialRows(for: .refine)
 
         let defaults = UserDefaults.standard
         self.soundCuesEnabled = defaults.object(forKey: SoundCues.enabledDefaultsKey) != nil
@@ -359,5 +419,137 @@ final class SettingsViewModel: ObservableObject {
     func copyToClipboard(_ text: String) {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(text, forType: .string)
+    }
+
+    // MARK: - Modelos (F3 Task 3)
+
+    /// Filas iniciales de una familia: el catálogo curado completo, marcando
+    /// como activa la preferencia efectiva persistida (ver nota en `init`
+    /// sobre por qué NO se consulta el engine aquí).
+    private static func initialRows(for kind: ModelKind) -> [ModelRowState] {
+        let activeId = ModelPreference.effectiveModelId(for: kind)
+        return ModelCatalog.options(for: kind).map { option in
+            ModelRowState(
+                option: option,
+                isActive: option.id == activeId,
+                isDownloading: false,
+                progress: 0)
+        }
+    }
+
+    private func rows(for kind: ModelKind) -> [ModelRowState] {
+        switch kind {
+        case .stt: return sttRows
+        case .refine: return refineRows
+        }
+    }
+
+    private func setRows(_ rows: [ModelRowState], for kind: ModelKind) {
+        switch kind {
+        case .stt: sttRows = rows
+        case .refine: refineRows = rows
+        }
+    }
+
+    /// Reemplaza (copia nueva, sin mutar en sitio) la fila `id` de la familia
+    /// `kind` aplicándole `transform`. Único punto de escritura fino sobre
+    /// `sttRows`/`refineRows` — mantiene las dos listas como datos inmutables
+    /// que se sustituyen enteros, que es lo que `@Published` observa bien.
+    private func updateRow(
+        id: String,
+        kind: ModelKind,
+        _ transform: (ModelRowState) -> ModelRowState
+    ) {
+        setRows(rows(for: kind).map { $0.id == id ? transform($0) : $0 }, for: kind)
+    }
+
+    /// `true` si alguna fila de `kind` tiene una descarga/conmutación en
+    /// vuelo. La vista lo usa para deshabilitar los botones "Usar" de esa
+    /// familia; `activateModel` lo usa como guard de doble activación.
+    func isSwitchInFlight(kind: ModelKind) -> Bool {
+        rows(for: kind).contains(where: \.isDownloading)
+    }
+
+    /// Descarga (si hace falta) y activa `option` como modelo de la familia
+    /// `kind`, con progreso en vivo en la fila correspondiente.
+    ///
+    /// Coreografía (F3 Task 3):
+    /// 1. Guards síncronos (todavía en MainActor, sin ventana de carrera con
+    ///    otros taps: SwiftUI entrega los clicks serializados en MainActor):
+    ///    ignorar si ya hay una conmutación en vuelo para esta familia
+    ///    (doble activación), si la opción ya es la activa, o si el id no
+    ///    está en las filas.
+    /// 2. Marcar la fila como descargando y lanzar un `Task` que llama al
+    ///    `switchModel` del engine correspondiente. El `progressHandler`
+    ///    puede dispararse desde cualquier hilo (contrato documentado en
+    ///    `WhisperTranscriber.prepare`) — por eso salta a MainActor antes de
+    ///    tocar la fila.
+    /// 3. Éxito → persistir con `ModelPreference.setPreferred` (SOLO tras el
+    ///    éxito — si la descarga falla, la preferencia previa queda intacta,
+    ///    espejo del contrato de `switchModel`: el modelo activo no se toca
+    ///    hasta conmutar) y recomputar `isActive` de TODAS las filas de la
+    ///    familia (exactamente una activa).
+    /// 4. Fallo → restaurar la fila (sin descarga, progreso 0), publicar un
+    ///    mensaje amigable en `modelsErrorMessage` y loggear el error real
+    ///    (el detalle técnico va al log, no a la UI).
+    func activateModel(_ option: ModelOption, kind: ModelKind) {
+        guard !isSwitchInFlight(kind: kind) else { return }
+        guard let row = rows(for: kind).first(where: { $0.id == option.id }),
+              !row.isActive
+        else { return }
+
+        modelsErrorMessage = nil
+        updateRow(id: option.id, kind: kind) { row in
+            var updated = row
+            updated.isDownloading = true
+            updated.progress = 0
+            return updated
+        }
+
+        // Capturas Sendable explícitas (strings) en vez de `option` entero:
+        // el closure de progreso es `@Sendable` y `ModelOption` (público, de
+        // KikiStore) no declara `Sendable`.
+        let optionId = option.id
+        let optionName = option.displayName
+
+        Task { @MainActor in
+            let progressHandler: @Sendable (Double) -> Void = { [weak self] fraction in
+                Task { @MainActor in
+                    self?.updateRow(id: optionId, kind: kind) { row in
+                        var updated = row
+                        updated.progress = fraction
+                        return updated
+                    }
+                }
+            }
+            do {
+                switch kind {
+                case .stt:
+                    try await self.transcriber.switchModel(to: optionId, progressHandler: progressHandler)
+                case .refine:
+                    try await self.refiner.switchModel(to: optionId, progressHandler: progressHandler)
+                }
+                ModelPreference.setPreferred(optionId, for: kind)
+                self.setRows(
+                    self.rows(for: kind).map { row in
+                        var updated = row
+                        updated.isActive = row.id == optionId
+                        updated.isDownloading = false
+                        updated.progress = 0
+                        return updated
+                    },
+                    for: kind)
+                KikiLog.log("kiki app: modelo \(kind.rawValue) activado desde Ajustes — \(optionId)")
+            } catch {
+                self.updateRow(id: optionId, kind: kind) { row in
+                    var updated = row
+                    updated.isDownloading = false
+                    updated.progress = 0
+                    return updated
+                }
+                self.modelsErrorMessage = "No se pudo activar \"\(optionName)\". Revisa tu conexión a internet y vuelve a intentarlo; el modelo actual sigue funcionando."
+                KikiLog.log("kiki app: fallo al activar modelo \(kind.rawValue) \(optionId): \(error)")
+            }
+        }
     }
 }
