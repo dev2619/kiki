@@ -71,9 +71,9 @@ Reglas:
 
 **Experiencia:** activar dictado (Fn o wake) → la burbuja live aparece (evolución del HUD pill) → el texto fluye mientras hablas: confirmado en blanco, hipótesis en gris → soltar Fn / silencio 1.5s (manos libres) → **se inserta exactamente el texto mostrado, al instante** (modo live no corre el LLM) y queda en clipboard (F2).
 
-- **Motor:** `AudioStreamTranscriber` de WhisperKit v1.0 (actor con `confirmedSegments`/`unconfirmedSegments` + callback de estado; ya disponible en el checkout pinneado). Alimentado por el mismo `AudioRecorder` (16kHz mono).
+- **Motor:** `AudioStreamTranscriber` de WhisperKit v1.0 (actor con `confirmedSegments`/`unconfirmedSegments` + callback de estado; ya disponible en el checkout pinneado). Alimentado por el mismo `AudioRecorder` (16kHz mono). [Ajustado en implementación: re-transcripción chunked propia porque AudioStreamTranscriber posee su propio micrófono y no acepta samples externos; el pass final del buffer completo al terminar es la autoridad de transcripción y cubre la cola de audio posterior al último parcial.]
 - **KikiCore:** nuevo protocolo `StreamTranscribing` (start/stop + callback de parciales) junto al `Transcribing` batch. `DictationController` gana modo live: `recording` con parciales fluyendo → al stop el resultado es lo acumulado; **no hay fase `processing` en live**.
-- **HUD:** `HUDModel` += `@Published liveText/unconfirmedText`; `HUDView` renderiza burbuja (ancho máx ~420pt, últimas ~3 líneas con auto-scroll; la pill actual es el estado sin texto).
+- **HUD:** `HUDModel` += `@Published liveText/unconfirmedText`; `HUDView` renderiza burbuja (ancho máx ~420pt, últimas ~3 líneas con auto-scroll; la pill actual es el estado sin texto). [Ajustado en implementación: confirmed/unconfirmed (blanco/gris) simplificado a un solo texto parcial — el chunked re-decode no produce segmentos confirmados estables sin la técnica clipTimestamps (optimización futura anotada).]
 - **Toggle:** settings **"Transcripción en vivo"**, default ON. OFF = comportamiento actual (batch + refinado LLM). La auto-edición no se pierde: se elige por modo.
 - **Manos libres:** tras wake (F4), el armed mode alimenta el mismo stream; fin por el silencio de 1.5s existente.
 - Latencia esperada: burbuja ~0.5s detrás de la voz con el modelo base en M1 Max; mejor con `small` (F3).
