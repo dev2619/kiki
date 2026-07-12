@@ -143,8 +143,7 @@ public final class DictationController {
             // más abajo — contrato de la burbuja: se ve hasta que el texto ya
             // está insertado, nunca antes.
             transition(to: .processing)
-            // El coordinator YA tiene todos los chunks (via `liveChunk`) — el
-            // pase final de `finish()` es la única autoridad de transcripción
+            // El pase final de `finish()` es la única autoridad de transcripción
             // para un dictado live. Se le pasa `samples` (el buffer del
             // recorder, autoritativo) como `fullAudio`: los hops de chunk
             // audio-thread → MainActor son Tasks no estructuradas, y al
