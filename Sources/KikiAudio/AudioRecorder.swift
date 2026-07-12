@@ -11,6 +11,9 @@ public final class AudioRecorder: AudioRecording {
     /// Nivel RMS por chunk, para animar el HUD. Se invoca en un hilo de audio en tiempo real — no bloquear.
     public var onLevel: ((Float) -> Void)?
 
+    /// Muestras 16kHz mono del chunk recién resampleado. Se invoca en un hilo de audio en tiempo real — no bloquear.
+    public var onChunk: (([Float]) -> Void)?
+
     public init() {}
 
     public func start() throws {
@@ -22,6 +25,7 @@ public final class AudioRecorder: AudioRecording {
             let chunk = AudioResampler.resampleTo16kMono(buffer)
             self.collectQueue.async { self.collected.append(contentsOf: chunk) }
             self.onLevel?(AudioResampler.rms(chunk))
+            self.onChunk?(chunk)
         }
         engine.prepare()
         do {
