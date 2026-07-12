@@ -124,6 +124,16 @@ public final class DictationController {
         guard state == .recording else { return }
         let samples = recorder.stop()
         if let liveSession = activeLiveSession {
+            // Tap accidental (mismo umbral que batch): sin esto, el pase final
+            // de Whisper sobre <0.3s de audio es fuente conocida de alucinaciones
+            // ("Gracias.") que SE INSERTARÍAN.
+            guard samples.count >= minimumSamples else {
+                activeLiveSession = nil
+                liveSession.cancel()
+                delegate?.dictationLivePartialDidChange(nil)
+                transition(to: .idle)
+                return
+            }
             activeLiveSession = nil
             // Limpia la burbuja ANTES de fijar `.processing` — mismo orden
             // que `cancel()`, evita que la última pill quede pegada mientras
@@ -136,7 +146,7 @@ public final class DictationController {
             // re-transcriben, solo se usan para `audioSeconds` de historial.
             let final = await liveSession.finish()
             let audioSeconds = Double(samples.count) / sampleRate
-            let language = await languageProvider?.detectedLanguage() ?? "es"
+            let language = "es" // bypassEnhancement ignora language; se evita el await muerto.
             await processTranscriptContent(final, audioSeconds: audioSeconds, language: language, bypassEnhancement: true)
             return
         }

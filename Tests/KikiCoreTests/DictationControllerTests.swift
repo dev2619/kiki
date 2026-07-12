@@ -1166,6 +1166,23 @@ final class DictationControllerTests: XCTestCase {
         XCTAssertEqual(liveTranscriber.callCount, 0)
     }
 
+    func test_liveShortTapCancelsWithoutInserting() async {
+        let (coordinator, liveTranscriber) = makeLiveCoordinator(scriptedTexts: ["should never be delivered"])
+        recorder.samplesToReturn = Array(repeating: 0.1, count: 1_000) // < 0.3 s * 16 kHz
+        controller = DictationController(
+            recorder: recorder, transcriber: transcriber, inserter: inserter,
+            liveEnabled: { true }, liveCoordinatorFactory: { coordinator })
+        controller.delegate = delegate
+
+        controller.hotkeyPressed()
+        await controller.hotkeyReleased()
+
+        XCTAssertTrue(inserter.inserted.isEmpty, "a short tap in live mode must not insert anything")
+        XCTAssertEqual(liveTranscriber.callCount, 0, "the coordinator's transcriber must not be called for a short tap (no final pass)")
+        XCTAssertEqual(controller.state, .idle)
+        XCTAssertEqual(delegate.livePartials.last ?? "sentinel", nil, "partial must be cleared (nil) on release")
+    }
+
     func test_toggleDisablingLiveMidDictationStillCompletesAsLive() async {
         let (coordinator, _) = makeLiveCoordinator(scriptedTexts: ["final live text"])
         var liveFlag = true
