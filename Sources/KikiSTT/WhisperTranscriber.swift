@@ -434,6 +434,16 @@ public actor WhisperTranscriber: Transcribing, LanguageDetecting {
     }
 
     private func doTranscribe(_ samples: [Float]) async throws -> String {
+        // Snapshot local del kit vigente al ENTRAR a esta transcripción. Se
+        // reusa (nunca se relee `self.whisperKit`) para toda la duración de
+        // `doTranscribe`, incluida la codificación del prompt del diccionario
+        // más abajo: hay un `await` (detectLangauge) entre esta línea y esa
+        // codificación, y el actor permite reentrancia en ese punto — si
+        // `switchModel` corriera en esa ventana y reemplazara `whisperKit`,
+        // leer la propiedad de nuevo tokenizaría el prompt con el tokenizer
+        // del modelo NUEVO mientras se decodifica con el kit VIEJO (bug de
+        // campo detectado en revisión de Task 2). Pasar el snapshot como
+        // parámetro a `dictionaryPromptTokens` elimina esa relectura.
         guard let whisperKit else {
             throw DictationError.transcriptionFailed("el modelo todavía no está cargado")
         }
@@ -465,7 +475,7 @@ public actor WhisperTranscriber: Transcribing, LanguageDetecting {
         // la salida). Requiere tokens ya codificados; se obtienen con
         // `whisperKit.tokenizer?.encode(text:)` (protocolo `WhisperTokenizer`,
         // `Core/Models.swift`).
-        if let promptTokens = dictionaryPromptTokens(language: language) {
+        if let promptTokens = dictionaryPromptTokens(kit: whisperKit, language: language) {
             options.promptTokens = promptTokens
         }
         KikiLog.log("kiki stt: inferencia iniciada (\(samples.count) muestras) — la primera tras arrancar puede tardar por compilación ANE/CoreML")
@@ -503,9 +513,13 @@ public actor WhisperTranscriber: Transcribing, LanguageDetecting {
     /// prompt tokenizado no supere `maxDictionaryPromptTokens`. Devuelve `nil` si no
     /// hay proveedor, no hay términos, el tokenizer todavía no está disponible, o ni
     /// siquiera el primer término entra en el presupuesto.
-    private func dictionaryPromptTokens(language: String) -> [Int]? {
+    ///
+    /// Recibe `kit` como parámetro (snapshot tomado por el caller antes de
+    /// cualquier `await`) en vez de releer `self.whisperKit`: ver nota de
+    /// reentrancia en `doTranscribe`.
+    private func dictionaryPromptTokens(kit: WhisperKit, language: String) -> [Int]? {
         guard let terms = dictionaryProvider?.terms(), !terms.isEmpty else { return nil }
-        guard let tokenizer = whisperKit?.tokenizer else { return nil }
+        guard let tokenizer = kit.tokenizer else { return nil }
 
         let header = language == "en" ? "Dictionary: " : "Glosario: "
         guard let promptText = Self.packTerms(
