@@ -430,6 +430,41 @@ final class DictationControllerTests: XCTestCase {
         XCTAssertEqual(controller.state, .idle)
     }
 
+    // MARK: - processTranscript bypassEnhancement (F1 Task 5: wake same-breath
+    // + live mode ON must also skip refine/translate, mirroring processLive)
+
+    func test_processTranscriptBypassEnhancementSkipsRefiner() async {
+        let refiner = MockRefiner()
+        refiner.textToReturn = "should never be used"
+        let context = MockContext()
+        controller = DictationController(
+            recorder: recorder, transcriber: transcriber, inserter: inserter,
+            refiner: refiner, context: context, minRefinableLength: 0,
+            translateEnabled: { true }, refineEnabled: { true })
+        controller.delegate = delegate
+
+        await controller.processTranscript("hello world", bypassEnhancement: true)
+
+        XCTAssertEqual(inserter.inserted, ["hello world"])
+        XCTAssertTrue(refiner.receivedTexts.isEmpty, "bypassEnhancement must skip refine/translate even when both toggles are on")
+        XCTAssertEqual(controller.state, .idle)
+    }
+
+    func test_processTranscriptDefaultStillRefines() async {
+        let refiner = MockRefiner()
+        refiner.textToReturn = "Hello world."
+        let context = MockContext()
+        controller = DictationController(
+            recorder: recorder, transcriber: transcriber, inserter: inserter,
+            refiner: refiner, context: context, minRefinableLength: 0)
+        controller.delegate = delegate
+
+        await controller.processTranscript("hello world")
+
+        XCTAssertEqual(inserter.inserted, ["Hello world."], "omitting bypassEnhancement must preserve existing refine behavior")
+        XCTAssertEqual(refiner.receivedTexts, ["hello world"])
+    }
+
     func test_processTranscriptEmptyIsNoop() async {
         let refiner = MockRefiner()
         refiner.textToReturn = "texto pulido."

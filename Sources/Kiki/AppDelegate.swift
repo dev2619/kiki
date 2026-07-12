@@ -87,6 +87,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var wakeToggleShortcut: WakeToggleShortcut!
     private var hud: HUDController!
     private var wakeListener: WakeListener!
+    /// F1 Task 5: coordinator display-only de la sesión manos-libres EN
+    /// CURSO, o `nil` fuera de una utterance armada. Distinto del que
+    /// `DictationController` maneja internamente para el flujo hotkey
+    /// (`activeLiveSession`, privado ahí) — este vive en `AppDelegate` porque
+    /// alimenta `hud.updateLiveText` directo con los chunks de
+    /// `wakeListener.onArmedChunk`, fuera del loop de estados del controller
+    /// (que para manos-libres solo participa en la ENTREGA final vía
+    /// `processLive`/`processTranscript(bypassEnhancement:)`). Creado
+    /// perezosamente en el primer chunk armado de CADA utterance
+    /// (`startWakeLiveIfEnabled`) y destruido al cerrar esa utterance
+    /// (`wakeListenerDidCapture`) o la sesión completa
+    /// (`wakeListenerDidDisarm`/Esc vía `cancelCapture()`).
+    private var wakeLiveCoordinator: LiveTranscriptionCoordinator?
     private var wakeEnabled = UserDefaults.standard.bool(forKey: AppDelegate.wakeEnabledKey)
     /// Espejo de lectura de `kiki.alwaysListening`. La fuente de escritura es
     /// `SettingsViewModel.alwaysListening.didSet` (mismo patrón que
@@ -223,15 +236,55 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // que `translateEnabled` — closure que relee la fuente de verdad en
             // cada refinado, sin efectos de ciclo de vida. `?? true` respeta el
             // default ON si el settingsViewModel aún no existe.
-            refineEnabled: { [weak self] in self?.settingsViewModel.refineEnabled ?? true })
+            refineEnabled: { [weak self] in self?.settingsViewModel.refineEnabled ?? true },
+            // F1 Task 5: interruptor "Transcripción en vivo" (default ON). Lee
+            // `UserDefaults` directo vía el helper estático de
+            // `SettingsViewModel` (no la instancia) — mismo motivo que
+            // `effectiveAlwaysListening()`: consistente con las otras
+            // lecturas de esta misma clave que hace `AppDelegate` para el
+            // flujo manos-libres (`startWakeLiveIfEnabled`,
+            // `wakeListenerDidCapture`, `wakeListenerDidCaptureSameBreath`),
+            // ninguna de las cuales pasa por la instancia de
+            // `settingsViewModel`.
+            liveEnabled: { SettingsViewModel.effectiveLiveTranscription() },
+            // Factory en vez de una instancia ya construida: el modo batch
+            // (liveEnabled() en false, el caso común) nunca paga el costo de
+            // instanciar un coordinator que no va a usar — ver doc de
+            // `DictationController.liveCoordinatorFactory`.
+            liveCoordinatorFactory: { [weak self] in
+                guard let self else { return nil }
+                return LiveTranscriptionCoordinator(transcriber: self.transcriber)
+            })
         controller.delegate = self
 
         wakeListener = WakeListener(transcriber: transcriber, speechRMSThreshold: Self.effectiveWakeRMSThreshold())
         wakeListener.delegate = self
+        // F1 Task 5: parciales display-only del flujo manos-libres — ver doc
+        // de `wakeLiveCoordinator`/`startWakeLiveIfEnabled`. Invocado sobre la
+        // cola serial de `WakeListener` (ver doc de `onArmedChunk`), por eso
+        // el salto a `@MainActor` acá, igual que `recorder.onChunk` abajo.
+        // `append` en vez de crear siempre: el coordinator ya existe desde el
+        // primer chunk armado de esta utterance; si no existe todavía
+        // (`nil`), `startWakeLiveIfEnabled` decide si crearlo (lee
+        // `kiki.liveTranscription` EN ESE INSTANTE) y le entrega este primer
+        // chunk.
+        wakeListener.onArmedChunk = { [weak self] chunk in
+            Task { @MainActor in
+                self?.wakeLiveCoordinator?.append(chunk) ?? self?.startWakeLiveIfEnabled(chunk)
+            }
+        }
 
         hud = HUDController()
         recorder.onLevel = { [weak self] level in
             Task { @MainActor in self?.hud.updateLevel(level) }
+        }
+        // F1 Task 5: reenvía cada chunk del hotkey al coordinator live activo
+        // de `DictationController` (no-op en modo batch — ver
+        // `DictationController.liveChunk`). Mismo salto a `@MainActor` que
+        // `onLevel` arriba; `recorder.onChunk` corre en el hilo de audio en
+        // tiempo real, nunca debe bloquear.
+        recorder.onChunk = { [weak self] chunk in
+            Task { @MainActor in self?.controller.liveChunk(chunk) }
         }
 
         setUpStatusItem()
@@ -402,6 +455,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // son "pausar"/"cancelar", no "ya terminé".
             wakeListener.stopAndFlush()
             hud.showArmed(false)
+            // F1 Task 5: si `stopAndFlush()` no alcanzó a volcar una utterance
+            // en curso vía `wakeListenerDidCapture` (que ya limpia esto por su
+            // cuenta), no debe quedar un coordinator display-only huérfano ni
+            // su burbuja pegada en pantalla. `cancel()` es idempotente.
+            wakeLiveCoordinator?.cancel()
+            wakeLiveCoordinator = nil
+            hud.updateLiveText(nil)
             // Si el toggle se apaga a mitad de una captura manos-libres (HUD
             // mostrando "Escuchando…" desde wakeListenerDidStartCapture), el
             // stop() de arriba no limpia ese estado — sin esto la pill queda
@@ -524,6 +584,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         settingsViewModel.syncWakeEnabled(wakeEnabled)
     }
 
+    /// F1 Task 5: crea (si "Transcripción en vivo" está ON EN ESTE INSTANTE)
+    /// el `wakeLiveCoordinator` display-only para la utterance manos-libres
+    /// que recién empezó a hablar, y le entrega este primer chunk armado —
+    /// ver doc de `wakeLiveCoordinator`. Llamado SOLO cuando
+    /// `wakeLiveCoordinator` todavía es `nil` (ver
+    /// `wakeListener.onArmedChunk` en `applicationDidFinishLaunching`); con
+    /// el toggle OFF es un no-op — los chunks armados de esa utterance nunca
+    /// generan pill de parciales, igual que el flujo hotkey con
+    /// `liveEnabled()` en `false`.
+    @MainActor private func startWakeLiveIfEnabled(_ chunk: [Float]) {
+        guard SettingsViewModel.effectiveLiveTranscription() else { return }
+        let coordinator = LiveTranscriptionCoordinator(transcriber: transcriber)
+        coordinator.onPartial = { [weak self] text in self?.hud.updateLiveText(text) }
+        coordinator.start()
+        coordinator.append(chunk)
+        wakeLiveCoordinator = coordinator
+    }
+
     /// Reacciona a `.kikiAlwaysListeningChanged` (posteado por
     /// `SettingsViewModel.alwaysListening.didSet`, ver doc de `alwaysListening`
     /// arriba): releé `UserDefaults` (fuente de verdad de escritura) y
@@ -567,6 +645,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // flags en OFF → ningún camino futuro la limpiaría).
             wakeListener.stopAndFlush()
             hud.showArmed(false)
+            // Ver comentario equivalente en la rama OFF de `toggleWake`.
+            wakeLiveCoordinator?.cancel()
+            wakeLiveCoordinator = nil
+            hud.updateLiveText(nil)
             if controller.state == .idle { hud.show(state: .idle) }
             updateStatusIcon()
         }
@@ -767,12 +849,13 @@ extension AppDelegate: DictationControllerDelegate {
         NotificationCenter.default.post(name: .kikiDictationInserted, object: nil)
     }
 
-    /// Conformidad mínima al nuevo requerimiento del protocolo (F1 Task 3).
-    /// El cableo real (burbuja HUD + `liveEnabled`/`liveCoordinatorFactory`
-    /// + `recorder.onChunk` → `controller.liveChunk`) llega en F1 Task 4/5 —
-    /// hasta entonces `AppDelegate` sigue en modo batch puro y este parcial
-    /// nunca se dispara en la práctica.
-    func dictationLivePartialDidChange(_ text: String?) {}
+    /// F1 Task 5: parciales del flujo HOTKEY (`DictationController.liveChunk`
+    /// vía `activeLiveSession.onPartial`) directo a la burbuja del HUD. `nil`
+    /// limpia la burbuja (release/cancel/tap accidental) — ver
+    /// `HUDController.updateLiveText`.
+    func dictationLivePartialDidChange(_ text: String?) {
+        hud.updateLiveText(text)
+    }
 }
 
 extension AppDelegate: WakeListenerDelegate {
@@ -826,11 +909,34 @@ extension AppDelegate: WakeListenerDelegate {
         // que `wakeEnabled` estuviera encendido — el resume debe seguir
         // tratándola como sesión vigente igual que con el toggle prendido.
         resumeAsArmed = (wakeEnabled || alwaysListening) && sessionIsCurrent
+        // F1 Task 5: la utterance terminó — el coordinator display-only (si
+        // había uno) ya cumplió su propósito, se cancela y se limpia la
+        // burbuja ANTES de rutear la entrega final, mismo orden que
+        // `DictationController.hotkeyReleased` (limpia el parcial antes de
+        // `.processing`). `cancel()` es idempotente (`nil` = no-op).
+        wakeLiveCoordinator?.cancel()
+        wakeLiveCoordinator = nil
+        hud.updateLiveText(nil)
+        // Lectura EN ESTE INSTANTE (entrega), no la de cuando arrancó la
+        // utterance: si el toggle cambió a mitad de la captura, la entrega
+        // final respeta el valor vigente ahora — mismo momento de lectura
+        // que `hotkeyPressed`/`hotkeyReleased` usan para su propia decisión
+        // (aunque ahí queda fijada en `activeLiveSession` para TODA la
+        // sesión; acá no hace falta esa fijación porque no hay un coordinator
+        // de ENTREGA persistente entre `.armed` y el resultado — solo el
+        // display-only de arriba, que ya se descartó).
+        let liveOn = SettingsViewModel.effectiveLiveTranscription()
         // No hud.show(state: .idle) aquí: controller.process() dispara
         // dictationStateDidChange(.processing) casi de inmediato vía su
         // delegate, así que un orderOut(.idle) intermedio solo producía un
         // flicker visible de la pill entre "Escuchando…" y "Procesando…".
-        Task { await controller.process(samples: samples) }
+        Task {
+            if liveOn {
+                await controller.processLive(samples: samples)
+            } else {
+                await controller.process(samples: samples)
+            }
+        }
     }
 
     func wakeListenerDidCaptureSameBreath(text: String, language: String, sessionIsCurrent: Bool) {
@@ -846,17 +952,33 @@ extension AppDelegate: WakeListenerDelegate {
         // el token de frescura por las mismas razones (ver traza de la
         // carrera arriba y el comentario equivalente en wakeListenerDidCapture).
         resumeAsArmed = (wakeEnabled || alwaysListening) && sessionIsCurrent
+        // F1 Task 5: mismo aliento con modo live ON también salta refinado/
+        // traducción — el texto que el usuario dijo se inserta tal cual,
+        // consistente con el resto del flujo manos-libres en modo live
+        // (`wakeListenerDidCapture` → `processLive`). Este path NUNCA pasa
+        // por `.armed` (corre en `.listening`, frase+remainder en un solo
+        // segmento — ver doc de `wakeListenerDidCaptureSameBreath`), así que
+        // no hay `wakeLiveCoordinator` que limpiar aquí.
+        let bypassEnhancement = SettingsViewModel.effectiveLiveTranscription()
         // `language` viene capturado JUNTO con el texto por WakeListener (misma
         // unidad serializada que su `transcribe()`), así que se pasa explícito
         // — el controller NO debe releerlo del transcriber en este path (cierre
         // de la TOCTOU, ver `processTranscript`/`wakeListenerDidCaptureSameBreath`).
-        Task { await controller.processTranscript(text, language: language) }
+        Task { await controller.processTranscript(text, language: language, bypassEnhancement: bypassEnhancement) }
     }
 
     func wakeListenerDidDisarm() {
         SoundCues.play(.disarmed)
         hud.showArmed(false)
         resumeAsArmed = false
+        // F1 Task 5: cubre Esc (`cancelCapture()`) y el timeout de desarmado
+        // — cualquier utterance en curso con parciales display-only en
+        // pantalla se descarta junto con el resto de la sesión. `cancel()` es
+        // idempotente, así que no importa si `wakeListenerDidCapture` ya la
+        // había limpiado para la última utterance entregada.
+        wakeLiveCoordinator?.cancel()
+        wakeLiveCoordinator = nil
+        hud.updateLiveText(nil)
         // Ver comentario equivalente en toggleWake: cubre el caso en que el
         // desarmado llega mientras la captura ya estaba en curso (p.ej.
         // segmentDiscarded con el listener armado) y la pill de "Escuchando…"

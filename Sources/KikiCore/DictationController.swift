@@ -208,7 +208,14 @@ public final class DictationController {
     ///   podía re-ejecutar `transcribe()` y sobrescribir `lastDetectedLanguage`
     ///   antes de esta lectura → idioma equivocado. Con `nil` (llamadores
     ///   públicos/otros) cae a la lectura del provider, comportamiento previo.
-    public func processTranscript(_ text: String, language: String? = nil) async {
+    /// - Parameter bypassEnhancement: F1 Task 5 (manos-libres, mismo aliento
+    ///   con modo live activo). `false` por defecto — comportamiento previo
+    ///   sin cambios (refina/traduce como siempre). `true` salta refinado y
+    ///   traducción exactamente igual que `processLive`/`hotkeyReleased` en
+    ///   modo live: el texto entregado en el mismo aliento por `WakeListener`
+    ///   ya es lo que el usuario ve/dijo, sin pase de IA — ver
+    ///   `AppDelegate.wakeListenerDidCaptureSameBreath`.
+    public func processTranscript(_ text: String, language: String? = nil, bypassEnhancement: Bool = false) async {
         guard state == .idle else { return }
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
@@ -219,7 +226,7 @@ public final class DictationController {
         } else {
             resolvedLanguage = await languageProvider?.detectedLanguage() ?? "es"
         }
-        await processTranscriptContent(text, audioSeconds: 0, language: resolvedLanguage)
+        await processTranscriptContent(text, audioSeconds: 0, language: resolvedLanguage, bypassEnhancement: bypassEnhancement)
     }
 
     private func processTranscriptContent(_ text: String, audioSeconds: Double = 0, language: String = "es", bypassEnhancement: Bool = false) async {

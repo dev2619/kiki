@@ -201,6 +201,43 @@ final class SettingsViewModel: ObservableObject {
     /// `AppDelegate.effectiveAlwaysListening()` la lee fuera de MainActor.
     nonisolated static let alwaysListeningDefaultsKey = "kiki.alwaysListening"
 
+    /// Toggle "Transcripción en vivo" (Ajustes → General, F1). Default ON —
+    /// mismo patrón "ausente = true" que `soundCuesEnabled`/`alwaysListening`.
+    /// Encendido: el dictado (hotkey Y manos-libres) muestra el texto en una
+    /// burbuja mientras se dicta y se inserta al soltar/terminar SIN pasar
+    /// por refinado ni traducción — ver `DictationController.processLive`/
+    /// `processTranscript(bypassEnhancement:)`. Apagado: vuelve al modo batch
+    /// con IA (refinado/traducción al final), comportamiento pre-F1.
+    ///
+    /// Sin efectos de ciclo de vida propios (no arranca/para ningún engine de
+    /// audio, a diferencia de `alwaysListening`) — el `didSet` solo persiste.
+    /// `AppDelegate` no lee esta propiedad de instancia: usa el helper
+    /// `effectiveLiveTranscription()` de abajo en todos sus puntos de lectura
+    /// (closure `liveEnabled` del `DictationController`, decisión de arranque
+    /// del coordinator de manos-libres, y el bypass de same-breath) — mismo
+    /// motivo que `effectiveAlwaysListening()`/`effectiveWakeRMSThreshold()`
+    /// en `AppDelegate`: una lectura directa de `UserDefaults` que no depende
+    /// de que `settingsViewModel` ya exista ni de estar en `MainActor`.
+    @Published var liveTranscriptionEnabled: Bool {
+        didSet {
+            UserDefaults.standard.set(liveTranscriptionEnabled, forKey: Self.liveTranscriptionDefaultsKey)
+        }
+    }
+
+    nonisolated static let liveTranscriptionDefaultsKey = "kiki.liveTranscription"
+
+    /// Lectura ausente→`true` de `kiki.liveTranscription`, mirror de
+    /// `AppDelegate.effectiveAlwaysListening()`. `nonisolated` para que
+    /// `AppDelegate` pueda invocarla desde closures que no corren en
+    /// `MainActor` (p. ej. `WakeListener.onArmedChunk`, confinado a la cola
+    /// serial del listener antes del salto a `@MainActor`).
+    nonisolated static func effectiveLiveTranscription() -> Bool {
+        let defaults = UserDefaults.standard
+        return defaults.object(forKey: liveTranscriptionDefaultsKey) != nil
+            ? defaults.bool(forKey: liveTranscriptionDefaultsKey)
+            : true
+    }
+
     /// F2 (spec 2026-07-11): tras dictar, la transcripción queda en el
     /// clipboard por defecto. Este toggle opt-in restaura el contenido
     /// anterior del clipboard ~0.4s después del paste (comportamiento
@@ -316,6 +353,7 @@ final class SettingsViewModel: ObservableObject {
         self.alwaysListening = defaults.object(forKey: Self.alwaysListeningDefaultsKey) != nil
             ? defaults.bool(forKey: Self.alwaysListeningDefaultsKey)
             : true
+        self.liveTranscriptionEnabled = Self.effectiveLiveTranscription()
         self.restoreClipboardAfterDictation =
             UserDefaults.standard.bool(forKey: Self.restoreClipboardDefaultsKey)
         // `integer(forKey:)` devuelve 0 cuando la clave está ausente — un cap

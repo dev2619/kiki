@@ -188,6 +188,12 @@ private struct GeneralSectionView: View {
             }
 
             Section {
+                Toggle("Transcripción en vivo", isOn: $viewModel.liveTranscriptionEnabled)
+            } footer: {
+                Text("Con esto activado, ves el texto en una burbuja mientras dictas y se inserta al instante al terminar — sin refinado ni traducción por IA en ese dictado. Desactívalo para volver al modo con IA (refinado/traducción), que procesa al final.")
+            }
+
+            Section {
                 Toggle("Refinar dictado con IA", isOn: $viewModel.refineEnabled)
             } footer: {
                 Text("Con esto activado (por defecto), kiki limpia el dictado con IA: quita muletillas (\"eh\", \"o sea\") y arregla puntuación y mayúsculas, sin cambiar tus palabras. Desactívalo si prefieres insertar exactamente lo que transcribe el dictado, sin ninguna corrección automática.")
