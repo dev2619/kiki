@@ -137,6 +137,22 @@ public final class WakeListener: @unchecked Sendable {
     public var state: State { queue.sync { _state } }
     public weak var delegate: WakeListenerDelegate?
 
+    /// F1 Task 5: chunks crudos de audio mientras `.armed` y el segmenter
+    /// interno está acumulando una captura de habla ACTIVA (desde el chunk
+    /// que dispara `speechStarted` hasta el que dispara el siguiente
+    /// `segmentEnded`/`segmentDiscarded`, ambos incluidos — ver
+    /// `forwardArmedChunkIfActive`). Alimenta un `LiveTranscriptionCoordinator`
+    /// display-only en `AppDelegate` para pintar parciales en la burbuja del
+    /// HUD durante manos-libres, en paralelo a la entrega final por
+    /// `wakeListenerDidCapture`/`wakeListenerDidCaptureSameBreath` — este
+    /// callback NUNCA participa de la transcripción que sí se entrega
+    /// (siempre corre sobre las `samples` completas del segmento). Invocado
+    /// SIEMPRE sobre `queue` (no `@MainActor`) — el caller hace el salto,
+    /// mismo contrato que `onLevel`/`onChunk` de `AudioRecorder`. Precisión
+    /// de bordes NO es un requisito (es solo texto display-only): un chunk de
+    /// más o de menos en el arranque/cierre del segmento es inocuo.
+    public var onArmedChunk: (([Float]) -> Void)?
+
     private let transcriber: Transcribing
     private let engine = AVAudioEngine()
     /// Cola serial: confina segmenter + estado, y es la cola destino del tap de audio.
@@ -269,6 +285,15 @@ public final class WakeListener: @unchecked Sendable {
     /// una captura.
     private var hasCapturedInSession = false
 
+    /// `true` mientras el chunk actual pertenece a una captura de habla activa
+    /// dentro de `.armed` — ver doc de `onArmedChunk`/`forwardArmedChunkIfActive`.
+    /// Se sigue aparte del propio `SpeechSegmenter` (opaco desde acá, solo
+    /// expone sus tres eventos de salida) en vez de preguntarle su estado
+    /// interno. Reseteado a `false` en cada punto que también resetea
+    /// `hasCapturedInSession` (`resetSessionCounters`, `arm`, `cancelCapture`,
+    /// `fireDisarmTimeout`) — los mismos límites de sesión/segmento aplican.
+    private var armedSpeechActive = false
+
     /// Pico de RMS observado en la ventana de calibración vigente (mientras
     /// `_state == .listening` o `.armed`); ver `calibrationWindowsLogged`.
     private var calibrationPeakRMS: Float = 0
@@ -397,6 +422,7 @@ public final class WakeListener: @unchecked Sendable {
         pendingSegment = nil
         accumulatedSampleCount = 0
         suppressUntilSampleCount = nil
+        armedSpeechActive = false
         calibrationPeakRMS = 0
         calibrationWindowSampleCount = 0
         calibrationWindowsLogged = 0
@@ -587,6 +613,7 @@ public final class WakeListener: @unchecked Sendable {
             _state = .listening
             suppressUntilSampleCount = nil
             hasCapturedInSession = false
+            armedSpeechActive = false
             KikiLog.log("kiki wake: captura cancelada, vuelvo a listening")
             notify { $0.wakeListenerDidDisarm() }
         }
@@ -618,7 +645,11 @@ public final class WakeListener: @unchecked Sendable {
             }
             suppressUntilSampleCount = nil
         }
-        switch segmenter.process(chunk: chunk, rms: rms) {
+        let event = segmenter.process(chunk: chunk, rms: rms)
+        if _state == .armed {
+            forwardArmedChunkIfActive(chunk, event: event)
+        }
+        switch event {
         case .none:
             break
         case .speechStarted:
@@ -636,6 +667,27 @@ public final class WakeListener: @unchecked Sendable {
                 scheduleDisarmTimeout()
             }
         }
+    }
+
+    /// F1 Task 5: alimenta `onArmedChunk` con los chunks crudos que
+    /// pertenecen a una captura de habla ACTIVA dentro de `.armed` — ver doc
+    /// de la propiedad. `armedSpeechActive` marca `true` en el mismo chunk
+    /// que dispara `.speechStarted` (incluido en la entrega) y `false` en el
+    /// que dispara `.segmentEnded`/`.segmentDiscarded` (también incluido, vía
+    /// `wasActive`) — display-only, sin pretensión de exactitud de bordes.
+    private func forwardArmedChunkIfActive(_ chunk: [Float], event: SegmenterEvent) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        let wasActive = armedSpeechActive
+        switch event {
+        case .speechStarted:
+            armedSpeechActive = true
+        case .segmentEnded, .segmentDiscarded:
+            armedSpeechActive = false
+        case .none:
+            break
+        }
+        guard wasActive || armedSpeechActive else { return }
+        onArmedChunk?(chunk)
     }
 
     /// Diagnóstico de calibración: registra el pico de RMS visto en modo
@@ -930,6 +982,7 @@ public final class WakeListener: @unchecked Sendable {
         // Frase nueva → arme inicial de la sesión: régimen de timeout corto
         // (8s) hasta la primera captura entregada.
         hasCapturedInSession = false
+        armedSpeechActive = false
         // Cualquier segmento de `.listening` que siguiera pendiente de
         // chequeo ya no aplica: el régimen armado usa `armedConfig`/otro
         // segmenter y ese audio no es dictado dirigido a kiki.
@@ -986,6 +1039,7 @@ public final class WakeListener: @unchecked Sendable {
         _state = .listening
         suppressUntilSampleCount = nil
         hasCapturedInSession = false
+        armedSpeechActive = false
         KikiLog.log("kiki wake: timeout sin dictado, vuelvo a listening")
         notify { $0.wakeListenerDidDisarm() }
     }
