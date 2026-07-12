@@ -23,6 +23,13 @@ public protocol Transcribing: AnyObject {
     func transcribe(_ samples: [Float]) async throws -> String
 }
 
+/// Transcripción leniente para parciales de display (F1 fix 2026-07-12):
+/// sin gates anti-alucinación — el texto NUNCA se inserta, solo pinta la
+/// burbuja live; los pases finales/insertables usan `Transcribing` (con gates).
+public protocol LenientTranscribing: AnyObject {
+    func transcribeLenient(_ samples: [Float]) async throws -> String
+}
+
 public protocol TextInserting: AnyObject {
     func insert(_ text: String) throws
 }

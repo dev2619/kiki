@@ -24,7 +24,7 @@ import WhisperKit
 /// variable de encadenado — la exclusión mutua real de las inferencias viene
 /// de que cada eslabón espera al anterior, no del actor en sí (un actor por
 /// sí solo permite reentrancia en sus puntos de `await`).
-public actor WhisperTranscriber: Transcribing, LanguageDetecting {
+public actor WhisperTranscriber: Transcribing, LanguageDetecting, LenientTranscribing {
     /// Identificador de modelo resuelto contra el repo HF `argmaxinc/whisperkit-coreml`
     /// (WhisperKit hace glob-match del `model:` contra las carpetas del repo;
     /// comportamiento verificado en 1.0.0, ver nota de versión en `Package.swift`).
@@ -454,16 +454,46 @@ public actor WhisperTranscriber: Transcribing, LanguageDetecting {
     }
 
     public func transcribe(_ samples: [Float]) async throws -> String {
+        try await enqueue(samples, applyGates: true)
+    }
+
+    /// Conformidad a `LenientTranscribing` (F1 fix 2026-07-12): mismo pipeline
+    /// de decodificación + misma cadena de serialización del actor + mismo
+    /// prompt de diccionario que `transcribe`, pero SIN las gates de
+    /// confianza/alucinación — ver doc de `doTranscribe(applyGates:)`. Solo
+    /// para parciales de display (`LiveTranscriptionCoordinator`); el texto
+    /// que devuelve NUNCA se inserta.
+    public func transcribeLenient(_ samples: [Float]) async throws -> String {
+        try await enqueue(samples, applyGates: false)
+    }
+
+    /// Encola `samples` detrás de cualquier transcripción en vuelo (misma
+    /// cadena de serialización para `transcribe`/`transcribeLenient` — ver
+    /// doc de tipo "Serialización de transcribe") y ejecuta `doTranscribe`
+    /// con `applyGates` indicando si aplican las gates de confianza/
+    /// alucinación (`true` para el pase estricto/insertable, `false` para el
+    /// leniente de display).
+    private func enqueue(_ samples: [Float], applyGates: Bool) async throws -> String {
         let previous = activeTranscription
         let task = Task {
             _ = try? await previous?.value
-            return try await self.doTranscribe(samples)
+            return try await self.doTranscribe(samples, applyGates: applyGates)
         }
         activeTranscription = task
         return try await task.value
     }
 
-    private func doTranscribe(_ samples: [Float]) async throws -> String {
+    /// - Parameter applyGates: `true` (pase estricto, `transcribe`) aplica la
+    ///   gate de confianza + denylist de alucinaciones y descarta devolviendo
+    ///   `""` cuando el resultado parece una alucinación de silencio/ruido —
+    ///   necesario porque este texto puede insertarse. `false` (pase leniente,
+    ///   `transcribeLenient`) se salta esa gate por completo y devuelve el
+    ///   texto crudo decodificado (recortado de espacios) — el texto SOLO
+    ///   pinta la burbuja live, nunca se inserta, así que no necesita
+    ///   protección anti-alucinación; esas mismas gates son justo lo que
+    ///   dejaba la burbuja en blanco en dictados cortos (buffers <2s), que son
+    ///   la mayoría en campo (F1 fix 2026-07-12).
+    private func doTranscribe(_ samples: [Float], applyGates: Bool) async throws -> String {
         // Snapshot local del kit vigente al ENTRAR a esta transcripción. Se
         // reusa (nunca se relee `self.whisperKit`) para toda la duración de
         // `doTranscribe`, incluida la codificación del prompt del diccionario
@@ -513,6 +543,14 @@ public actor WhisperTranscriber: Transcribing, LanguageDetecting {
         let results = try await whisperKit.transcribe(audioArray: samples, decodeOptions: options)
         KikiLog.log("kiki stt: inferencia completada en \(String(format: "%.1f", Date().timeIntervalSince(started)))s")
         let text = results.map(\.text).joined(separator: " ")
+
+        // Pase leniente (F1 fix 2026-07-12): sin gate de alucinaciones — ver
+        // doc de `applyGates` arriba. Devuelve el texto crudo recortado tal
+        // cual lo decodificó Whisper, ni siquiera se calculan las métricas de
+        // confianza (no hacen falta sin la gate).
+        guard applyGates else {
+            return text.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
 
         // Gate de alucinaciones (ver doc de `isLikelyHallucination` y de
         // `aggregateConfidence`): las métricas de confianza por-segmento se

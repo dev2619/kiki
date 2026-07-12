@@ -37,6 +37,42 @@ final class MockLiveTranscriber: Transcribing {
     }
 }
 
+/// Scripted `Transcribing` + `LenientTranscribing` mock — regression coverage
+/// for the F1 fix (2026-07-12): `LiveTranscriptionCoordinator`'s interim
+/// passes must call `transcribeLenient` when the transcriber exposes it
+/// (never the strict, gated `transcribe`), while the FINAL pass
+/// (`finish()`) must always call the strict `transcribe`, gates included,
+/// because its result can be inserted. Tracks lenient/strict call counts
+/// separately so tests can assert exactly which path fired.
+final class MockLenientLiveTranscriber: Transcribing, LenientTranscribing {
+    var scriptedLenientTexts: [String] = []
+    var scriptedStrictTexts: [String] = []
+    private(set) var lenientCallCount = 0
+    private(set) var strictCallCount = 0
+    private(set) var lenientReceivedSamples: [[Float]] = []
+    private(set) var strictReceivedSamples: [[Float]] = []
+
+    func transcribeLenient(_ samples: [Float]) async throws -> String {
+        lenientCallCount += 1
+        let index = lenientCallCount
+        lenientReceivedSamples.append(samples)
+        if index <= scriptedLenientTexts.count {
+            return scriptedLenientTexts[index - 1]
+        }
+        return scriptedLenientTexts.last ?? ""
+    }
+
+    func transcribe(_ samples: [Float]) async throws -> String {
+        strictCallCount += 1
+        let index = strictCallCount
+        strictReceivedSamples.append(samples)
+        if index <= scriptedStrictTexts.count {
+            return scriptedStrictTexts[index - 1]
+        }
+        return scriptedStrictTexts.last ?? ""
+    }
+}
+
 /// Mutable injectable clock — tests advance it explicitly to control
 /// `minPassInterval` gating without depending on wall-clock timing.
 private final class MutableNow {
@@ -425,5 +461,60 @@ final class LiveTranscriptionCoordinatorTests: XCTestCase {
         // The final pass result should be somewhere in the returned values.
         XCTAssert(finishResult1 == "final pass text" || finishResult2 == "final pass text",
                   "at least one finish() call must return the final pass result")
+    }
+
+    // MARK: (9) F1 fix 2026-07-12 — interim passes use transcribeLenient when available
+
+    func test_interimPassesUseLenientTranscriptionWhenTranscriberSupportsIt() {
+        let transcriber = MockLenientLiveTranscriber()
+        transcriber.scriptedLenientTexts = ["hola leniente"]
+        let nowBox = MutableNow()
+        let coordinator = LiveTranscriptionCoordinator(
+            transcriber: transcriber, minPassInterval: 0.8, minNewAudioSeconds: 0.4,
+            sampleRate: 16_000, now: nowBox.now)
+        coordinator.start()
+
+        var partials: [String] = []
+        let firstPartial = expectation(description: "first partial")
+        coordinator.onPartial = { text in
+            partials.append(text)
+            firstPartial.fulfill()
+        }
+        coordinator.append(samples(count: 6_400))
+        wait(for: [firstPartial], timeout: 1.0)
+
+        XCTAssertEqual(partials, ["hola leniente"])
+        XCTAssertEqual(transcriber.lenientCallCount, 1, "an interim pass must call transcribeLenient when the transcriber supports it")
+        XCTAssertEqual(transcriber.strictCallCount, 0, "an interim pass must never call the strict, gated transcribe when transcribeLenient is available")
+    }
+
+    // MARK: (10) F1 fix 2026-07-12 — finish() always uses strict transcription
+
+    func test_finalPassAlwaysUsesStrictTranscriptionEvenWhenLenientIsAvailable() {
+        let transcriber = MockLenientLiveTranscriber()
+        transcriber.scriptedLenientTexts = ["parcial leniente"]
+        transcriber.scriptedStrictTexts = ["final estricto"]
+        let nowBox = MutableNow()
+        let coordinator = LiveTranscriptionCoordinator(
+            transcriber: transcriber, minPassInterval: 0.8, minNewAudioSeconds: 0.4,
+            sampleRate: 16_000, now: nowBox.now)
+        coordinator.start()
+
+        let firstPartial = expectation(description: "interim partial via lenient path")
+        coordinator.onPartial = { _ in firstPartial.fulfill() }
+        coordinator.append(samples(count: 6_400))
+        wait(for: [firstPartial], timeout: 1.0)
+
+        var finishResult: String?
+        let finishExpectation = expectation(description: "finish completes")
+        Task { @MainActor in
+            finishResult = await coordinator.finish()
+            finishExpectation.fulfill()
+        }
+        wait(for: [finishExpectation], timeout: 1.0)
+
+        XCTAssertEqual(finishResult, "final estricto")
+        XCTAssertEqual(transcriber.strictCallCount, 1, "finish() must always call the strict, gated transcribe — its result can be inserted")
+        XCTAssertEqual(transcriber.lenientCallCount, 1, "only the interim pass should have used transcribeLenient; finish() must not")
     }
 }

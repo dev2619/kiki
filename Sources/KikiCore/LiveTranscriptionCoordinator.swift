@@ -42,6 +42,19 @@ import Foundation
 /// Privacidad: los logs de esta clase nunca incluyen el contenido
 /// transcripto, solo conteos de muestras — igual que el resto del pipeline
 /// (`DictationController`, `WakeListener`).
+///
+/// ## Gates estrictas vs. lenientes (F1 fix 2026-07-12)
+/// Los pases INTERMEDIOS (`launchPass`) llaman `transcribeLenient` (sin gates
+/// anti-alucinación, ver `LenientTranscribing`) cuando el `transcriber`
+/// inyectado la expone — su resultado solo pinta la burbuja HUD y nunca se
+/// inserta, así que no necesita la protección anti-alucinación de
+/// `WhisperTranscriber`, que en cambio estaba dejando la burbuja en blanco
+/// para la mayoría de dictados cortos de campo (buffers <2s, denylist de
+/// texto <20 chars). El pase FINAL (`finish()`) sigue llamando siempre al
+/// `transcribe` estricto (con gates): su resultado sí puede insertarse. Un
+/// `transcriber` que no conforma `LenientTranscribing` (mocks de tests
+/// existentes, u otro `Transcribing` futuro) cae siempre al `transcribe`
+/// estricto en ambos casos — comportamiento idéntico al de antes de este fix.
 @MainActor
 public final class LiveTranscriptionCoordinator {
     private let transcriber: Transcribing
@@ -195,7 +208,21 @@ public final class LiveTranscriptionCoordinator {
         currentPassTask = Task { [weak self] in
             var result: String?
             do {
-                result = try await transcriber.transcribe(samples)
+                // F1 fix 2026-07-12: los pases INTERMEDIOS son solo para
+                // pintar la burbuja HUD, nunca se insertan — usan
+                // `transcribeLenient` (sin gates anti-alucinación) cuando el
+                // transcriber la expone, para que dictados cortos (buffers
+                // <2s, la mayoría en campo) muestren texto en vez de que la
+                // gate los descarte y la burbuja quede en blanco. El pase
+                // FINAL (`finish()`, abajo) sigue en `transcribe` estricto
+                // porque su resultado sí puede insertarse. Conformers que no
+                // implementan `LenientTranscribing` (p. ej. mocks de tests
+                // existentes) caen al `transcribe` estricto de siempre.
+                if let lenient = transcriber as? LenientTranscribing {
+                    result = try await lenient.transcribeLenient(samples)
+                } else {
+                    result = try await transcriber.transcribe(samples)
+                }
             } catch {
                 KikiLog.log("kiki live: pase falló (\(error))")
             }
