@@ -809,6 +809,9 @@ extension AppDelegate: DictationControllerDelegate {
         // prerequisito de ninguna de las dos mitades.
         if state != .idle && (wakeEnabled || alwaysListening) {
             wakeListener.stop()
+            // Invariante: todo camino que corta el flujo de chunks armados debe cosechar el coordinator — si no, su buffer sobrevive y la próxima utterance concatena texto viejo (finding review F1 T5).
+            wakeLiveCoordinator?.cancel()
+            wakeLiveCoordinator = nil
             // Si la pausa la originó una captura de manos-libres
             // (`resumeAsArmed`), la pill "👂 Te escucho…" debe persistir en
             // pantalla durante todo el procesamiento — no ocultarla aquí.
@@ -882,6 +885,9 @@ extension AppDelegate: WakeListenerDelegate {
         // procesa. Descartar explícitamente en vez de dejar que
         // `controller.process` la rechace por su cuenta, porque eso dejaría
         // `resumeAsArmed` pegado en `true` sin que nada lo limpie después.
+        // Invariante: todo camino que corta el flujo de chunks armados debe cosechar el coordinator — si no, su buffer sobrevive y la próxima utterance concatena texto viejo (finding review F1 T5).
+        wakeLiveCoordinator?.cancel()
+        wakeLiveCoordinator = nil
         guard controller.state == .idle else {
             KikiLog.log("kiki: captura descartada — controller en \(controller.state)")
             return
@@ -909,13 +915,10 @@ extension AppDelegate: WakeListenerDelegate {
         // que `wakeEnabled` estuviera encendido — el resume debe seguir
         // tratándola como sesión vigente igual que con el toggle prendido.
         resumeAsArmed = (wakeEnabled || alwaysListening) && sessionIsCurrent
-        // F1 Task 5: la utterance terminó — el coordinator display-only (si
-        // había uno) ya cumplió su propósito, se cancela y se limpia la
-        // burbuja ANTES de rutear la entrega final, mismo orden que
-        // `DictationController.hotkeyReleased` (limpia el parcial antes de
-        // `.processing`). `cancel()` es idempotente (`nil` = no-op).
-        wakeLiveCoordinator?.cancel()
-        wakeLiveCoordinator = nil
+        // F1 Task 5: limpia la burbuja ANTES de rutear la entrega final, mismo
+        // orden que `DictationController.hotkeyReleased` (limpia el parcial
+        // antes de `.processing`). El coordinator ya se canceló/limpió en el
+        // guard pre-existing.
         hud.updateLiveText(nil)
         // Lectura EN ESTE INSTANTE (entrega), no la de cuando arrancó la
         // utterance: si el toggle cambió a mitad de la captura, la entrega
