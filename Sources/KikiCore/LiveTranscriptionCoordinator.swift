@@ -132,6 +132,9 @@ public final class LiveTranscriptionCoordinator {
         if let inFlight = currentPassTask {
             await inFlight.value
         }
+        // Re-check tras la suspensión: dos finish() concurrentes pueden pasar
+        // el primer guard; solo el primero corre el pass final.
+        guard !isFinished else { return lastNonEmptyPartial }
         // Fence: un cancel() pudo haber corrido mientras esperábamos el pase
         // en vuelo — en ese caso este finish() no entrega nada.
         guard capturedGeneration == generation else { return "" }
@@ -146,7 +149,7 @@ public final class LiveTranscriptionCoordinator {
             }
             return text
         } catch {
-            KikiLog.log("kiki live: pase final falló (\(error))")
+            KikiLog.log("kiki live: pase final falló (\(type(of: error)))")
             guard capturedGeneration == generation else { return "" }
             return lastNonEmptyPartial
         }

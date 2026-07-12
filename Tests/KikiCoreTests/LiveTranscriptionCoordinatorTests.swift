@@ -104,6 +104,10 @@ final class LiveTranscriptionCoordinatorTests: XCTestCase {
         coordinator.append(samples(count: 6_400)) // launches pass1 at simulated t0
         wait(for: [firstCallStarted], timeout: 1.0)
 
+        // Advance the simulated clock past minPassInterval (measured from pass1's start)
+        // BEFORE the second append so the in-flight guard (not interval) is what blocks pass2.
+        nowBox.advance(1.0)
+
         // Plenty of new audio arrives WHILE pass1 is still in flight (sleeping).
         coordinator.append(samples(count: 6_400)) // total 12_800
 
@@ -111,9 +115,6 @@ final class LiveTranscriptionCoordinatorTests: XCTestCase {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.03) { settleWhileInFlight.fulfill() }
         wait(for: [settleWhileInFlight], timeout: 1.0)
         XCTAssertEqual(transcriber.callCount, 1, "a second pass must not start while one is in flight, even with enough new audio")
-
-        // Advance the simulated clock past minPassInterval (measured from pass1's start).
-        nowBox.advance(1.0)
 
         let secondCallStarted = expectation(description: "second pass started")
         transcriber.onCallStarted = { index in if index == 2 { secondCallStarted.fulfill() } }
@@ -342,5 +343,56 @@ final class LiveTranscriptionCoordinatorTests: XCTestCase {
         XCTAssertEqual(finishResult, "", "a finish() pending at cancel() time must not deliver the in-flight pass's text")
         XCTAssertTrue(partials.isEmpty, "cancel() must prevent onPartial from ever firing, even for a pass already in flight when cancel() was called")
         XCTAssertEqual(transcriber.callCount, 1, "no further passes must launch after cancel()")
+    }
+
+    // MARK: (8) concurrent double-finish must run only one final pass
+
+    func test_concurrentDoubleFinishRunsSingleFinalPass() {
+        let transcriber = MockLiveTranscriber()
+        transcriber.delaySeconds = 0.05 // Slow pass so both finish() calls can start
+        transcriber.scriptedTexts = ["partial pass", "final pass text"]
+        let nowBox = MutableNow()
+        let coordinator = LiveTranscriptionCoordinator(
+            transcriber: transcriber, minPassInterval: 0.8, minNewAudioSeconds: 0.4,
+            sampleRate: 16_000, now: nowBox.now)
+        coordinator.start()
+
+        let firstCallStarted = expectation(description: "first pass started")
+        transcriber.onCallStarted = { index in if index == 1 { firstCallStarted.fulfill() } }
+        coordinator.append(samples(count: 6_400))
+        wait(for: [firstCallStarted], timeout: 1.0)
+
+        // Append more audio while pass1 is in flight — the final pass will see this.
+        coordinator.append(samples(count: 3_200)) // total 9_600
+
+        var finishResult1: String?
+        var finishResult2: String?
+        let finishExpectation1 = expectation(description: "finish1 completes")
+        let finishExpectation2 = expectation(description: "finish2 completes")
+
+        // Launch two finish() calls concurrently — both will pass the first guard,
+        // but only the first through the re-check should run the final pass.
+        Task { @MainActor in
+            finishResult1 = await coordinator.finish()
+            finishExpectation1.fulfill()
+        }
+        Task { @MainActor in
+            finishResult2 = await coordinator.finish()
+            finishExpectation2.fulfill()
+        }
+
+        wait(for: [finishExpectation1, finishExpectation2], timeout: 2.0)
+
+        XCTAssertEqual(transcriber.callCount, 2, "only one regular pass + one final pass (no double final)")
+        // The final pass (call 2) should transcribe the full buffer.
+        if transcriber.receivedSamples.count > 1 {
+            XCTAssertEqual(transcriber.receivedSamples[1].count, 9_600, "the final pass must see the full buffer")
+        }
+        // At least one finish() call returns the final pass result; both should have non-nil values.
+        XCTAssertNotNil(finishResult1, "first finish() must return a value")
+        XCTAssertNotNil(finishResult2, "second finish() must return a value")
+        // The final pass result should be somewhere in the returned values.
+        XCTAssert(finishResult1 == "final pass text" || finishResult2 == "final pass text",
+                  "at least one finish() call must return the final pass result")
     }
 }
