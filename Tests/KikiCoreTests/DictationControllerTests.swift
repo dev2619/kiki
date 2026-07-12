@@ -93,11 +93,19 @@ final class SpyDelegate: DictationControllerDelegate {
     var errors: [DictationError] = []
     var insertCount = 0
     var livePartials: [String?] = []
+    /// Combined chronological log (Fix 2 bubble-contract regression test):
+    /// interleaves insert/live-partial events in call order, so a test can
+    /// assert the partial-clear (nil) fires AFTER insertion instead of just
+    /// checking each array independently (which can't express relative order).
+    var events: [String] = []
 
     func dictationStateDidChange(_ state: DictationState) { states.append(state) }
     func dictationDidFail(_ error: DictationError) { errors.append(error) }
-    func dictationDidInsert() { insertCount += 1 }
-    func dictationLivePartialDidChange(_ text: String?) { livePartials.append(text) }
+    func dictationDidInsert() { insertCount += 1; events.append("insert") }
+    func dictationLivePartialDidChange(_ text: String?) {
+        livePartials.append(text)
+        events.append(text.map { "livePartial:\($0)" } ?? "livePartial:nil")
+    }
 }
 
 final class MockSnippets: SnippetExpanding {
@@ -1243,6 +1251,56 @@ final class DictationControllerTests: XCTestCase {
         controller.hotkeyPressed()
         controller.liveChunk(Array(repeating: Float(0.1), count: 4_000)) // must not crash
         XCTAssertEqual(controller.state, .recording)
+    }
+
+    // MARK: - Bubble contract during the final live pass (Fix 2): the bubble
+    // stays through `.processing` (HUDView already renders a spinner-in-bubble
+    // branch for that state + liveText != nil) and clears (nil) only AFTER
+    // the final transcript has been inserted — never before, so the user
+    // never sees a bare "Procesando…" pill flash in between.
+
+    func test_livePartialCanArriveDuringFinalPassAndClearsAfterInsert() async {
+        // Low minNewAudioSeconds + a delayed transcriber so a pass is
+        // genuinely in flight at release — `finish()` must wait for it
+        // (delivering its own onPartial, possibly during `.processing`)
+        // before running the final pass.
+        let liveTranscriber = MockLiveTranscriber()
+        liveTranscriber.delaySeconds = 0.1
+        liveTranscriber.scriptedTexts = ["partial during recording", "final live text"]
+        let coordinator = LiveTranscriptionCoordinator(
+            transcriber: liveTranscriber, minPassInterval: 0,
+            minNewAudioSeconds: 0.05, sampleRate: 16_000) // 800 samples
+        controller = DictationController(
+            recorder: recorder, transcriber: transcriber, inserter: inserter,
+            liveEnabled: { true }, liveCoordinatorFactory: { coordinator })
+        controller.delegate = delegate
+
+        let firstPassStarted = expectation(description: "first pass started")
+        liveTranscriber.onCallStarted = { index in if index == 1 { firstPassStarted.fulfill() } }
+
+        controller.hotkeyPressed()
+        controller.liveChunk(Array(repeating: Float(0.1), count: 1_600)) // launches pass1 (0.1s delay)
+        await fulfillment(of: [firstPassStarted], timeout: 1.0)
+
+        // Release while pass1 is still in flight — finish() waits for it,
+        // then runs the final pass.
+        await controller.hotkeyReleased()
+
+        XCTAssertEqual(inserter.inserted, ["final live text"])
+        XCTAssertEqual(controller.state, .idle)
+        XCTAssertEqual(delegate.livePartials.last ?? "sentinel", nil, "the delegate's LAST live-partial event must clear the bubble")
+
+        // No crash / ordering violation: a partial (from the in-flight pass
+        // finish() awaited) may legitimately arrive while state == .processing.
+        XCTAssertTrue(delegate.states.contains(.processing))
+
+        guard let insertIndex = delegate.events.firstIndex(of: "insert") else {
+            return XCTFail("insert event never fired")
+        }
+        guard let finalNilIndex = delegate.events.lastIndex(of: "livePartial:nil") else {
+            return XCTFail("live-partial nil clear never fired")
+        }
+        XCTAssertGreaterThan(finalNilIndex, insertIndex, "the bubble must clear (nil) AFTER insertion — never before .processing, per Fix 2's contract")
     }
 
     func test_processLiveSkipsRefineAndTranslate() async {

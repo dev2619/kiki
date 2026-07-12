@@ -345,6 +345,37 @@ final class LiveTranscriptionCoordinatorTests: XCTestCase {
         XCTAssertEqual(transcriber.callCount, 1, "no further passes must launch after cancel()")
     }
 
+    // MARK: (8b) finish(fullAudio:) transcribes the CALLER-supplied buffer,
+    // not the internal one accumulated via append() — regression coverage
+    // for the tail-audio-loss fix: chunks hop audio-thread → MainActor via
+    // unstructured Tasks, so at release some hops can still be in flight and
+    // the internal buffer can miss the last ~85-170ms that the recorder's
+    // own (authoritative) buffer already has.
+
+    func test_finishWithFullAudioOverridesInternalBuffer() async {
+        let transcriber = MockLiveTranscriber()
+        transcriber.scriptedTexts = ["final from full audio"]
+        let nowBox = MutableNow()
+        let coordinator = LiveTranscriptionCoordinator(
+            transcriber: transcriber, minPassInterval: 0.8, minNewAudioSeconds: 0.4,
+            sampleRate: 16_000, now: nowBox.now)
+        coordinator.start()
+
+        // Internal buffer only sees 1_600 samples via append (no pass fires —
+        // well below the 6_400-sample threshold).
+        coordinator.append(samples(count: 1_600))
+
+        // The recorder's authoritative buffer has more (simulates in-flight
+        // chunk hops that never reached the coordinator by release time).
+        let authoritativeAudio = samples(count: 4_800)
+
+        let finishResult = await coordinator.finish(fullAudio: authoritativeAudio)
+
+        XCTAssertEqual(finishResult, "final from full audio")
+        XCTAssertEqual(transcriber.callCount, 1)
+        XCTAssertEqual(transcriber.receivedSamples.first?.count, 4_800, "finish(fullAudio:) must transcribe the caller-supplied buffer, not the internal 1_600-sample buffer")
+    }
+
     // MARK: (8) concurrent double-finish must run only one final pass
 
     func test_concurrentDoubleFinishRunsSingleFinalPass() {

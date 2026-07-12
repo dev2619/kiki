@@ -122,9 +122,16 @@ public final class LiveTranscriptionCoordinator {
         maybeStartPass()
     }
 
-    /// Pass final sobre el buffer completo; espera el pass en vuelo si hay.
+    /// Pass final; espera el pass en vuelo si hay.
     /// Devuelve el texto final (o el último parcial si el pass final falla; "" si nada).
-    public func finish() async -> String {
+    ///
+    /// - Parameter fullAudio: buffer autoritativo del recorder — los hops de
+    ///   chunks pueden llegar tarde al MainActor y el buffer interno perder
+    ///   la cola del dictado. Cuando no es `nil`, el pase final transcribe
+    ///   ESTE buffer en vez del `buffer` interno acumulado por `append` — el
+    ///   resto del contrato (espera del pase en vuelo, fences de generación/
+    ///   `isFinished`, fallback a `lastNonEmptyPartial`) no cambia.
+    public func finish(fullAudio: [Float]? = nil) async -> String {
         guard !isCancelled else { return "" }
         guard !isFinished else { return lastNonEmptyPartial }
         isFinishing = true
@@ -139,7 +146,7 @@ public final class LiveTranscriptionCoordinator {
         // en vuelo — en ese caso este finish() no entrega nada.
         guard capturedGeneration == generation else { return "" }
         isFinished = true
-        let samples = buffer
+        let samples = fullAudio ?? buffer
         KikiLog.log("kiki live: pase final (\(samples.count) muestras)")
         do {
             let text = try await transcriber.transcribe(samples)

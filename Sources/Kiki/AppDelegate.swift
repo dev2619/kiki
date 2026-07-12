@@ -812,6 +812,14 @@ extension AppDelegate: DictationControllerDelegate {
             // Invariante: todo camino que corta el flujo de chunks armados debe cosechar el coordinator — si no, su buffer sobrevive y la próxima utterance concatena texto viejo (finding review F1 T5).
             wakeLiveCoordinator?.cancel()
             wakeLiveCoordinator = nil
+            // Limpia la burbuja del stream manos-libres reapeado arriba — sin
+            // esto, un dictado por HOTKEY que interrumpe una utterance
+            // manos-libres armada con parciales ya pintados dejaba esa pill
+            // vieja pegada en pantalla. Con el contrato de Fix 2, el flujo
+            // hotkey pinta sus propios parciales sobre esta misma burbuja
+            // apenas lleguen (o la pill batch si liveEnabled está OFF), así
+            // que este clear nunca compite con nada.
+            hud.updateLiveText(nil)
             // Si la pausa la originó una captura de manos-libres
             // (`resumeAsArmed`), la pill "👂 Te escucho…" debe persistir en
             // pantalla durante todo el procesamiento — no ocultarla aquí.

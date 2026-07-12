@@ -135,19 +135,30 @@ public final class DictationController {
                 return
             }
             activeLiveSession = nil
-            // Limpia la burbuja ANTES de fijar `.processing` — mismo orden
-            // que `cancel()`, evita que la última pill quede pegada mientras
-            // corre el pase final.
-            delegate?.dictationLivePartialDidChange(nil)
+            // La burbuja se mantiene en pantalla durante el pase final (no se
+            // limpia acá) — `HUDView` ya renderiza el spinner-en-burbuja para
+            // `.processing` + liveText != nil, y cualquier parcial en vuelo
+            // que llegue durante ese pase la sigue actualizando. Recién se
+            // limpia (nil) DESPUÉS de que `processTranscriptContent` inserta,
+            // más abajo — contrato de la burbuja: se ve hasta que el texto ya
+            // está insertado, nunca antes.
             transition(to: .processing)
             // El coordinator YA tiene todos los chunks (via `liveChunk`) — el
             // pase final de `finish()` es la única autoridad de transcripción
-            // para un dictado live; las muestras del recorder NO se
-            // re-transcriben, solo se usan para `audioSeconds` de historial.
-            let final = await liveSession.finish()
+            // para un dictado live. Se le pasa `samples` (el buffer del
+            // recorder, autoritativo) como `fullAudio`: los hops de chunk
+            // audio-thread → MainActor son Tasks no estructuradas, y al
+            // soltar la tecla puede haber hops todavía en vuelo que el buffer
+            // interno del coordinator (alimentado solo por `liveChunk`) aún
+            // no recibió — perdiendo hasta ~85-170ms de cola de dictado. El
+            // buffer del recorder, en cambio, ya tiene TODO el audio grabado
+            // en el momento de `stop()`.
+            let final = await liveSession.finish(fullAudio: samples)
             let audioSeconds = Double(samples.count) / sampleRate
             let language = "es" // bypassEnhancement ignora language; se evita el await muerto.
             await processTranscriptContent(final, audioSeconds: audioSeconds, language: language, bypassEnhancement: true)
+            // Limpia la burbuja DESPUÉS de insertar — ver comentario arriba.
+            delegate?.dictationLivePartialDidChange(nil)
             return
         }
         guard samples.count >= minimumSamples else {
