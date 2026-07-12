@@ -92,10 +92,12 @@ final class SpyDelegate: DictationControllerDelegate {
     var states: [DictationState] = []
     var errors: [DictationError] = []
     var insertCount = 0
+    var livePartials: [String?] = []
 
     func dictationStateDidChange(_ state: DictationState) { states.append(state) }
     func dictationDidFail(_ error: DictationError) { errors.append(error) }
     func dictationDidInsert() { insertCount += 1 }
+    func dictationLivePartialDidChange(_ text: String?) { livePartials.append(text) }
 }
 
 final class MockSnippets: SnippetExpanding {
@@ -981,5 +983,234 @@ final class DictationControllerTests: XCTestCase {
         await controller.hotkeyReleased()
 
         XCTAssertEqual(inserter.inserted, [String(repeating: "b", count: 19)], "Translate mode's relaxed floor (0.3x) must accept a shorter translation that the normal 1/3 guard would reject")
+    }
+
+    // MARK: - Live Dictation Mode (F1 Task 3)
+    //
+    // `liveEnabled`/`liveCoordinatorFactory` let `hotkeyPressed` start a
+    // `LiveTranscriptionCoordinator` alongside the recorder. The live decision
+    // is CAPTURED at press time (`activeLiveSession`) so a mid-dictation
+    // settings toggle can't change the flow of an in-flight dictation. On
+    // release, the coordinator's `finish()` result — NOT a re-transcription
+    // of the recorder's samples — is what gets inserted, and refine/translate
+    // are always skipped for a live dictation regardless of their toggles.
+    // Reuses `MockLiveTranscriber` from `LiveTranscriptionCoordinatorTests.swift`
+    // (same test target).
+
+    private func makeLiveCoordinator(
+        scriptedTexts: [String], minNewAudioSeconds: Double = 60
+    ) -> (LiveTranscriptionCoordinator, MockLiveTranscriber) {
+        let liveTranscriber = MockLiveTranscriber()
+        liveTranscriber.scriptedTexts = scriptedTexts
+        let coordinator = LiveTranscriptionCoordinator(
+            transcriber: liveTranscriber, minPassInterval: 0,
+            minNewAudioSeconds: minNewAudioSeconds, sampleRate: 16_000)
+        return (coordinator, liveTranscriber)
+    }
+
+    func test_liveModePressStartsRecordingAndCoordinatorPartialsFlowToDelegate() {
+        let (coordinator, liveTranscriber) = makeLiveCoordinator(
+            scriptedTexts: ["hola live"], minNewAudioSeconds: 0.1) // 1_600 samples
+        controller = DictationController(
+            recorder: recorder, transcriber: transcriber, inserter: inserter,
+            liveEnabled: { true }, liveCoordinatorFactory: { coordinator })
+        controller.delegate = delegate
+
+        controller.hotkeyPressed()
+        XCTAssertTrue(recorder.started)
+        XCTAssertEqual(controller.state, .recording)
+        XCTAssertEqual(delegate.states, [.recording])
+
+        controller.liveChunk(Array(repeating: Float(0.1), count: 2_000))
+
+        let settle = expectation(description: "partial delivered")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { settle.fulfill() }
+        wait(for: [settle], timeout: 1.0)
+
+        XCTAssertEqual(liveTranscriber.callCount, 1)
+        XCTAssertEqual(delegate.livePartials, ["hola live"], "the coordinator's onPartial must forward to the delegate")
+    }
+
+    func test_liveReleaseInsertsCoordinatorFinishResultNotRetranscription() async {
+        let (coordinator, _) = makeLiveCoordinator(scriptedTexts: ["final live text"])
+        controller = DictationController(
+            recorder: recorder, transcriber: transcriber, inserter: inserter,
+            liveEnabled: { true }, liveCoordinatorFactory: { coordinator })
+        controller.delegate = delegate
+
+        transcriber.textToReturn = "should never be used"
+        controller.hotkeyPressed()
+        await controller.hotkeyReleased()
+
+        XCTAssertEqual(inserter.inserted, ["final live text"])
+        XCTAssertTrue(transcriber.receivedSamples.isEmpty, "the batch transcriber must never run for a live dictation")
+        XCTAssertEqual(controller.state, .idle)
+        XCTAssertEqual(delegate.livePartials.last ?? "sentinel", nil, "partial must be cleared (nil) on release")
+    }
+
+    func test_liveReleaseNeverCallsRefinerEvenWhenRefineEnabled() async {
+        let (coordinator, _) = makeLiveCoordinator(scriptedTexts: ["final live text"])
+        let refiner = MockRefiner()
+        refiner.textToReturn = "should never be used"
+        let context = MockContext()
+        controller = DictationController(
+            recorder: recorder, transcriber: transcriber, inserter: inserter,
+            refiner: refiner, context: context, minRefinableLength: 0,
+            refineEnabled: { true },
+            liveEnabled: { true }, liveCoordinatorFactory: { coordinator })
+        controller.delegate = delegate
+
+        controller.hotkeyPressed()
+        await controller.hotkeyReleased()
+
+        XCTAssertTrue(refiner.receivedTexts.isEmpty, "refiner must never be invoked for a live dictation, even with refineEnabled true")
+        XCTAssertEqual(inserter.inserted, ["final live text"])
+    }
+
+    func test_liveReleaseNeverCallsTranslateEvenWhenTranslateEnabled() async {
+        let (coordinator, _) = makeLiveCoordinator(scriptedTexts: ["final live text"])
+        let refiner = MockRefiner()
+        refiner.textToReturn = "should never be used"
+        let context = MockContext()
+        controller = DictationController(
+            recorder: recorder, transcriber: transcriber, inserter: inserter,
+            refiner: refiner, context: context, minRefinableLength: 0,
+            translateEnabled: { true }, refineEnabled: { false },
+            liveEnabled: { true }, liveCoordinatorFactory: { coordinator })
+        controller.delegate = delegate
+
+        controller.hotkeyPressed()
+        await controller.hotkeyReleased()
+
+        XCTAssertTrue(refiner.receivedTexts.isEmpty, "translate must never run for a live dictation, even with translateEnabled true")
+        XCTAssertTrue(refiner.receivedTranslateFlags.isEmpty)
+        XCTAssertEqual(inserter.inserted, ["final live text"])
+    }
+
+    func test_liveReleaseRecordsHistory() async {
+        let (coordinator, _) = makeLiveCoordinator(scriptedTexts: ["final live text"])
+        let history = MockHistory()
+        controller = DictationController(
+            recorder: recorder, transcriber: transcriber, inserter: inserter,
+            history: history,
+            liveEnabled: { true }, liveCoordinatorFactory: { coordinator })
+        controller.delegate = delegate
+
+        controller.hotkeyPressed()
+        await controller.hotkeyReleased()
+
+        XCTAssertEqual(history.recordings.count, 1)
+        let record = history.recordings[0]
+        XCTAssertEqual(record.rawText, "final live text")
+        XCTAssertEqual(record.finalText, "final live text")
+    }
+
+    func test_liveReleaseEmptyFinalInsertsNothing() async {
+        let (coordinator, _) = makeLiveCoordinator(scriptedTexts: ["   \n "])
+        let history = MockHistory()
+        controller = DictationController(
+            recorder: recorder, transcriber: transcriber, inserter: inserter,
+            history: history,
+            liveEnabled: { true }, liveCoordinatorFactory: { coordinator })
+        controller.delegate = delegate
+
+        controller.hotkeyPressed()
+        await controller.hotkeyReleased()
+
+        XCTAssertTrue(inserter.inserted.isEmpty, "an empty live final transcript must behave like the batch empty-transcription path")
+        XCTAssertTrue(history.recordings.isEmpty)
+        XCTAssertEqual(controller.state, .idle)
+    }
+
+    func test_liveDisabledFallsBackToBatchPathEvenWithFactoryProvided() async {
+        let (coordinator, liveTranscriber) = makeLiveCoordinator(scriptedTexts: ["should never be used"])
+        controller = DictationController(
+            recorder: recorder, transcriber: transcriber, inserter: inserter,
+            liveEnabled: { false }, liveCoordinatorFactory: { coordinator })
+        controller.delegate = delegate
+
+        transcriber.textToReturn = "batch text"
+        controller.hotkeyPressed()
+        await controller.hotkeyReleased()
+
+        XCTAssertEqual(inserter.inserted, ["batch text"])
+        XCTAssertEqual(liveTranscriber.callCount, 0, "the coordinator's transcriber must never run when liveEnabled() is false at press")
+    }
+
+    func test_liveFactoryNilFallsBackToBatchPathEvenWhenLiveEnabledTrue() async {
+        controller = DictationController(
+            recorder: recorder, transcriber: transcriber, inserter: inserter,
+            liveEnabled: { true }, liveCoordinatorFactory: nil)
+        controller.delegate = delegate
+
+        transcriber.textToReturn = "batch text"
+        controller.hotkeyPressed()
+        await controller.hotkeyReleased()
+
+        XCTAssertEqual(inserter.inserted, ["batch text"])
+    }
+
+    func test_cancelDuringLiveClearsPartialAndInsertsNothing() {
+        let (coordinator, liveTranscriber) = makeLiveCoordinator(scriptedTexts: ["should never be delivered"])
+        controller = DictationController(
+            recorder: recorder, transcriber: transcriber, inserter: inserter,
+            liveEnabled: { true }, liveCoordinatorFactory: { coordinator })
+        controller.delegate = delegate
+
+        controller.hotkeyPressed()
+        controller.cancel()
+
+        XCTAssertEqual(controller.state, .idle)
+        XCTAssertTrue(inserter.inserted.isEmpty)
+        XCTAssertEqual(delegate.livePartials, [nil], "cancel must clear the live partial via a nil delivery")
+        XCTAssertEqual(liveTranscriber.callCount, 0)
+    }
+
+    func test_toggleDisablingLiveMidDictationStillCompletesAsLive() async {
+        let (coordinator, _) = makeLiveCoordinator(scriptedTexts: ["final live text"])
+        var liveFlag = true
+        controller = DictationController(
+            recorder: recorder, transcriber: transcriber, inserter: inserter,
+            liveEnabled: { liveFlag }, liveCoordinatorFactory: { coordinator })
+        controller.delegate = delegate
+
+        controller.hotkeyPressed()
+        XCTAssertEqual(controller.state, .recording)
+
+        liveFlag = false // toggle flips mid-dictation, AFTER press
+        transcriber.textToReturn = "should never be used"
+        await controller.hotkeyReleased()
+
+        XCTAssertEqual(inserter.inserted, ["final live text"], "the in-flight dictation must complete as live even though liveEnabled() now returns false")
+        XCTAssertTrue(transcriber.receivedSamples.isEmpty, "the batch transcriber must not run for a dictation captured as live")
+    }
+
+    func test_liveChunkIsNoopWithoutActiveLiveSession() {
+        // liveEnabled defaults to false / no factory — `controller` (setUp's
+        // default instance) never has an active live session.
+        controller.hotkeyPressed()
+        controller.liveChunk(Array(repeating: Float(0.1), count: 4_000)) // must not crash
+        XCTAssertEqual(controller.state, .recording)
+    }
+
+    func test_processLiveSkipsRefineAndTranslate() async {
+        let refiner = MockRefiner()
+        refiner.textToReturn = "should never be used"
+        let context = MockContext()
+        controller = DictationController(
+            recorder: recorder, transcriber: transcriber, inserter: inserter,
+            refiner: refiner, context: context, minRefinableLength: 0,
+            translateEnabled: { true }, refineEnabled: { true })
+        controller.delegate = delegate
+
+        let validSamples: [Float] = Array(repeating: 0.1, count: 16_000)
+        transcriber.textToReturn = "wake live batch text"
+
+        await controller.processLive(samples: validSamples)
+
+        XCTAssertEqual(inserter.inserted, ["wake live batch text"])
+        XCTAssertTrue(refiner.receivedTexts.isEmpty, "processLive must skip refine/translate — it's a wake live delivery")
+        XCTAssertEqual(controller.state, .idle)
+        XCTAssertEqual(transcriber.receivedSamples.count, 16_000, "processLive still batch-transcribes the delivered samples")
     }
 }

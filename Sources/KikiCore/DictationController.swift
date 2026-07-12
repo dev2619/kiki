@@ -37,6 +37,22 @@ public final class DictationController {
     private let languageProvider: LanguageDetecting?
     private let translateEnabled: () -> Bool
     private let refineEnabled: () -> Bool
+    /// F1 Task 3 (modo live): consultado SOLO en `hotkeyPressed` — la
+    /// decisión se captura en `activeLiveSession` para ese dictado completo,
+    /// ver doc ahí.
+    private let liveEnabled: () -> Bool
+    /// Factory en vez de un `LiveTranscriptionCoordinator` ya construido: así
+    /// el modo batch (el caso común, `liveEnabled` en `false`) nunca paga el
+    /// costo de instanciar un coordinator que no va a usar. El controller
+    /// invoca la factory una vez por dictado live, al `hotkeyPressed`.
+    private let liveCoordinatorFactory: (() -> LiveTranscriptionCoordinator?)?
+    /// Coordinator del dictado live EN CURSO, o `nil` en modo batch. Se fija
+    /// en `hotkeyPressed` (capturando `liveEnabled()` en ESE instante) y se
+    /// limpia a `nil` al terminar (`hotkeyReleased`) o cancelar (`cancel()`).
+    /// Consultarlo en vez de releer `liveEnabled()` en `hotkeyReleased`/
+    /// `cancel()` es lo que garantiza que un toggle de Ajustes a mitad de un
+    /// dictado no le cambie el flujo al dictado ya en curso.
+    private var activeLiveSession: LiveTranscriptionCoordinator?
 
     public init(
         recorder: AudioRecording,
@@ -52,7 +68,9 @@ public final class DictationController {
         minRefinableLength: Int = 25,
         languageProvider: LanguageDetecting? = nil,
         translateEnabled: @escaping () -> Bool = { false },
-        refineEnabled: @escaping () -> Bool = { true }
+        refineEnabled: @escaping () -> Bool = { true },
+        liveEnabled: @escaping () -> Bool = { false },
+        liveCoordinatorFactory: (() -> LiveTranscriptionCoordinator?)? = nil
     ) {
         self.recorder = recorder
         self.transcriber = transcriber
@@ -68,21 +86,60 @@ public final class DictationController {
         self.languageProvider = languageProvider
         self.translateEnabled = translateEnabled
         self.refineEnabled = refineEnabled
+        self.liveEnabled = liveEnabled
+        self.liveCoordinatorFactory = liveCoordinatorFactory
     }
 
     public func hotkeyPressed() {
         guard state == .idle else { return }
         do {
             try recorder.start()
+            // Captura la decisión live PARA ESTE DICTADO — ver doc de
+            // `activeLiveSession`. Se evalúa `liveEnabled()` una sola vez
+            // acá; `hotkeyReleased`/`cancel()` consultan `activeLiveSession`,
+            // nunca vuelven a leer `liveEnabled()`.
+            if liveEnabled(), let coordinator = liveCoordinatorFactory?() {
+                activeLiveSession = coordinator
+                coordinator.onPartial = { [weak self] text in
+                    self?.delegate?.dictationLivePartialDidChange(text)
+                }
+                coordinator.start()
+            } else {
+                activeLiveSession = nil
+            }
             transition(to: .recording)
         } catch {
             delegate?.dictationDidFail(.audioUnavailable(String(describing: error)))
         }
     }
 
+    /// Reenvía un chunk de audio al coordinator live activo (hop a MainActor
+    /// lo hace el caller, típicamente `AppDelegate` desde `recorder.onChunk`).
+    /// No-op en modo batch (`activeLiveSession == nil`).
+    public func liveChunk(_ chunk: [Float]) {
+        activeLiveSession?.append(chunk)
+    }
+
     public func hotkeyReleased() async {
         guard state == .recording else { return }
         let samples = recorder.stop()
+        if let liveSession = activeLiveSession {
+            activeLiveSession = nil
+            // Limpia la burbuja ANTES de fijar `.processing` — mismo orden
+            // que `cancel()`, evita que la última pill quede pegada mientras
+            // corre el pase final.
+            delegate?.dictationLivePartialDidChange(nil)
+            transition(to: .processing)
+            // El coordinator YA tiene todos los chunks (via `liveChunk`) — el
+            // pase final de `finish()` es la única autoridad de transcripción
+            // para un dictado live; las muestras del recorder NO se
+            // re-transcriben, solo se usan para `audioSeconds` de historial.
+            let final = await liveSession.finish()
+            let audioSeconds = Double(samples.count) / sampleRate
+            let language = await languageProvider?.detectedLanguage() ?? "es"
+            await processTranscriptContent(final, audioSeconds: audioSeconds, language: language, bypassEnhancement: true)
+            return
+        }
         guard samples.count >= minimumSamples else {
             transition(to: .idle) // tap accidental
             return
@@ -98,7 +155,21 @@ public final class DictationController {
         await transcribeAndProcess(samples)
     }
 
-    private func transcribeAndProcess(_ samples: [Float]) async {
+    /// Entrada live de manos-libres (F1 Task 3): transcribe en batch las
+    /// muestras entregadas (idéntico a `process(samples:)`) pero SALTA
+    /// refinado/traducción — los parciales de la sesión wake son
+    /// display-only y los pinta `AppDelegate` directo con su propio
+    /// coordinator (F1 Task 5), este método solo participa en la ENTREGA
+    /// final.
+    public func processLive(samples: [Float]) async {
+        guard state == .idle else { return }
+        guard samples.count >= minimumSamples else {
+            return // tap accidental
+        }
+        await transcribeAndProcess(samples, bypassEnhancement: true)
+    }
+
+    private func transcribeAndProcess(_ samples: [Float], bypassEnhancement: Bool = false) async {
         transition(to: .processing)
         do {
             let audioSeconds = Double(samples.count) / sampleRate
@@ -107,7 +178,7 @@ public final class DictationController {
             let text = try await transcriber.transcribe(samples)
             KikiLog.log("kiki core: transcripción lista en \(String(format: "%.2f", Date().timeIntervalSince(started)))s — \(text.count) chars: \"\(text)\"")
             let language = await languageProvider?.detectedLanguage() ?? "es"
-            await processTranscriptContent(text, audioSeconds: audioSeconds, language: language)
+            await processTranscriptContent(text, audioSeconds: audioSeconds, language: language, bypassEnhancement: bypassEnhancement)
         } catch let error as DictationError {
             transition(to: .idle)
             delegate?.dictationDidFail(error)
@@ -141,7 +212,7 @@ public final class DictationController {
         await processTranscriptContent(text, audioSeconds: 0, language: resolvedLanguage)
     }
 
-    private func processTranscriptContent(_ text: String, audioSeconds: Double = 0, language: String = "es") async {
+    private func processTranscriptContent(_ text: String, audioSeconds: Double = 0, language: String = "es", bypassEnhancement: Bool = false) async {
         do {
             let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
             if !trimmed.isEmpty {
@@ -157,7 +228,7 @@ public final class DictationController {
                 }
 
                 // Phase 2: Refinement
-                let final = await refineOrFallback(trimmed, language: language)
+                let final = await refineOrFallback(trimmed, language: language, bypassEnhancement: bypassEnhancement)
                 try inserter.insert(final)
                 KikiLog.log("kiki core: texto insertado")
                 delegate?.dictationDidInsert()
@@ -180,6 +251,11 @@ public final class DictationController {
 
     public func cancel() {
         guard state == .recording else { return }
+        if let liveSession = activeLiveSession {
+            liveSession.cancel()
+            activeLiveSession = nil
+            delegate?.dictationLivePartialDidChange(nil)
+        }
         _ = recorder.stop()
         transition(to: .idle)
     }
@@ -190,7 +266,15 @@ public final class DictationController {
         delegate?.dictationStateDidChange(newState)
     }
 
-    private func refineOrFallback(_ text: String, language: String) async -> String {
+    private func refineOrFallback(_ text: String, language: String, bypassEnhancement: Bool = false) async -> String {
+        // Dictado live (F1 Task 3): el pase final del coordinator YA es el
+        // texto entregado — refinado y traducción se saltan por completo,
+        // sin mutar `refineEnabled`/`translateEnabled` (evita tocar estado
+        // compartido con cualquier otro dictado concurrente/futuro).
+        guard !bypassEnhancement else {
+            KikiLog.log("kiki core: refinado/traducción salteados (dictado live)")
+            return text
+        }
         guard let refiner else { return text }
         let translate = translateEnabled()
         // Interruptor "Refinar dictado con IA" (Ajustes → General, default ON).

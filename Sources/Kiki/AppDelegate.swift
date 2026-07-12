@@ -766,6 +766,13 @@ extension AppDelegate: DictationControllerDelegate {
         SoundCues.play(.inserted)
         NotificationCenter.default.post(name: .kikiDictationInserted, object: nil)
     }
+
+    /// Conformidad mínima al nuevo requerimiento del protocolo (F1 Task 3).
+    /// El cableo real (burbuja HUD + `liveEnabled`/`liveCoordinatorFactory`
+    /// + `recorder.onChunk` → `controller.liveChunk`) llega en F1 Task 4/5 —
+    /// hasta entonces `AppDelegate` sigue en modo batch puro y este parcial
+    /// nunca se dispara en la práctica.
+    func dictationLivePartialDidChange(_ text: String?) {}
 }
 
 extension AppDelegate: WakeListenerDelegate {

@@ -36,6 +36,15 @@ public protocol DictationControllerDelegate: AnyObject {
     /// vacío vía extensión para no romper conformers/tests existentes que no
     /// lo necesitan.
     func dictationDidInsert()
+    /// Parcial en vivo del `LiveTranscriptionCoordinator` activo durante un
+    /// dictado live (F1 Task 3). `nil` limpia la burbuja HUD — se entrega así
+    /// explícitamente al terminar (`hotkeyReleased`) o cancelar (`cancel()`)
+    /// un dictado live, nunca a través de `onPartial` (que solo dispara con
+    /// texto no vacío, ver `LiveTranscriptionCoordinator`). Llega en
+    /// MainActor, igual que el resto de este delegate. Sin default vía
+    /// extensión a propósito: los conformers existentes (`AppDelegate`, spies
+    /// de test) deben decidir explícitamente qué hacer con el parcial.
+    func dictationLivePartialDidChange(_ text: String?)
 }
 
 extension DictationControllerDelegate {
