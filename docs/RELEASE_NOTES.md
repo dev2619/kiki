@@ -6,9 +6,9 @@ Dictado por voz con IA, 100% local, para macOS (Apple Silicon).
 
 ### Transcripción en vivo
 Mientras hablas, tu texto aparece en una burbuja que fluye en tiempo real:
-- Actívalo con **Fn y** (o con "escúchame kiki" tras la detección rápida de wake).
+- Actívalo manteniendo **Fn** o con «escúchame kiki» tras la detección rápida de wake.
 - Al soltar la tecla o tras 1.5 segundos de silencio, el texto se inserta al instante — **sin esperar a refinamiento con IA**.
-- En modo live, la Transcripción en vivo corre desactivada automáticamente; si lo prefieres, hay un interruptor en Ajustes para volver al modo con refinamiento.
+- En modo live, el refinamiento/traducción con IA se salta para ese dictado — el interruptor "Transcripción en vivo" de Ajustes vuelve al modo con refinamiento cuando lo prefieras.
 - El texto insertado queda en el portapapeles, como siempre.
 
 **kiki 1.0 completa la experiencia:** dictado en vivo + detección rápida de wake + modelos elegibles + portapapeles — ahora puedes dictar tan rápido como escribes.
