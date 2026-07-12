@@ -291,6 +291,28 @@ public actor WhisperTranscriber: Transcribing, LanguageDetecting {
             KikiLog.log("kiki stt: modelo cargado (\(modelName)) en \(String(format: "%.1f", Date().timeIntervalSince(started)))s")
         } catch {
             KikiLog.log("kiki stt: \(modelName) no disponible (\(error))")
+            // F3 Task 2 (ronda de completion) — guard del verificador wake:
+            // NI el hop de fallback a base NI el fallback genérico de abajo
+            // deben aplicar cuando esta instancia es el verificador tiny del
+            // wake (`Self.wakeModel`, ver `AppDelegate.wakeTranscriber`). Si
+            // el tiny (~75MB) falla, cargar el base (954MB) o el "recomendado"
+            // genérico de WhisperKit AQUÍ significaría mantener un SEGUNDO
+            // modelo grande completo en RAM (junto al `transcriber` principal
+            // que ya lo tiene) solo para verificar segmentos de ~0.5s de la
+            // frase de activación — un desperdicio de memoria además de una
+            // descarga pesada e inesperada para lo que se documenta como
+            // carga "sin bloquear el arranque ni la UI" (ver
+            // `AppDelegate.loadModelInBackground`). El diseño de fallback ya
+            // existente en `AppDelegate` (sin verificador tiny →
+            // `WakeListener` sigue verificando con el `transcriber` principal,
+            // ver `wakeListener.setWakeVerifier`/catch de esa carga) es
+            // estrictamente mejor: cero costo extra, mismo resultado
+            // funcional. Por eso, para el wake, el error se propaga tal cual
+            // sin intentar ningún hop.
+            guard modelName != Self.wakeModel else {
+                KikiLog.log("kiki stt: modelo wake (\(modelName)) no disponible; sin fallback a base ni al recomendado (evitar 1GB+ extra en RAM solo para el verificador) — AppDelegate sigue verificando con el transcriber principal")
+                throw error
+            }
             // F3 Task 2: si el modelo preferido (no-base) falló, intentar el
             // base ANTES del fallback genérico de abajo — cubre el caso en
             // que la preferencia SÍ está en catálogo pero su descarga/carga

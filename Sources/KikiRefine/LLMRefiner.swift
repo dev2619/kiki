@@ -61,17 +61,35 @@ public final class LLMRefiner: Refining {
     /// para refinamiento de texto corto en Apple Silicon.
     public static let preferredModel = "mlx-community/Qwen2.5-3B-Instruct-4bit"
 
-    private var modelContainer: ModelContainer?
+    /// F3 Task 2 (ronda de completion) — CONFINAMIENTO A MAINACTOR, no lock
+    /// ad hoc: `LLMRefiner` es una clase plana sin actor/queue propio, y
+    /// `refine()` corre deliberadamente FUERA de MainActor (ver doc de clase
+    /// arriba, nota de cancelación / `dictionaryProvider`). En vez de
+    /// convertir la clase entera a `actor` (habría obligado a reverificar
+    /// que el hop de actor no reintroduce el bug de cancelación que motivó
+    /// el `TokenIterator` de bajo nivel) o inventar un `NSLock` ad hoc, la
+    /// decisión (controller, ver `task-2-report.md` § Completion round) fue
+    /// aislar SOLO el estado mutable (`modelContainer`/`modelName`) a
+    /// `@MainActor` — el mismo patrón que ya usa el resto de la app para
+    /// cruzar hacia/desde engines de fondo (ver `AppDelegate.loadModelInBackground`,
+    /// que ya salta a MainActor antes de tocar UI). Todas las ESCRITURAS
+    /// (`prepare()`, `switchModel()`) pasan por `await MainActor.run { ... }`
+    /// explícito; toda LECTURA desde fuera de MainActor (`refine()`) también.
+    /// El compilador however exige `await` en cualquier acceso — eso es
+    /// justamente la garantía: no hay forma de tocar estas dos propiedades
+    /// sin pasar por el mismo executor serial (MainActor), así que dos
+    /// escrituras (p. ej. un `switchModel` en vuelo con `prepare()`, o dos
+    /// `switchModel` concurrentes) quedan serializadas por MainActor mismo,
+    /// sin condición de carrera sobre el propio storage.
+    @MainActor private var modelContainer: ModelContainer?
     public private(set) var isReady = false
 
     /// Identificador del modelo MLX que carga esta instancia (F3 Task 2 —
-    /// mirror de `WhisperTranscriber.modelName`). Sin `switchModel` (ver
-    /// análisis de sincronización en `prepare`/init doc), esta propiedad solo
-    /// se reasigna dentro de `prepare()` — antes de que `isReady` sea `true`
-    /// y por tanto antes de que ningún `refine()` pueda haberla leído — así
-    /// que mutarla ahí no reintroduce la carrera que motivó no implementar
-    /// `switchModel` todavía.
-    private(set) var modelName: String
+    /// mirror de `WhisperTranscriber.modelName`). `@MainActor` por el mismo
+    /// motivo que `modelContainer` arriba — ver esa doc. Se reasigna dentro
+    /// de `prepare()` (fallback a base) y de `switchModel()` (conmutación
+    /// exitosa), siempre vía `await MainActor.run { ... }`.
+    @MainActor private(set) var modelName: String
 
     /// Diccionario personal del usuario (Fase 3, Task 3/4).
     ///
@@ -99,8 +117,11 @@ public final class LLMRefiner: Refining {
     }
 
     /// Modelo MLX actualmente activo (el que sirve `refine`), tras la última
-    /// carga exitosa. Mirror de `WhisperTranscriber.currentModel`.
-    public var currentModel: String { modelName }
+    /// carga o conmutación exitosa. Mirror de `WhisperTranscriber.currentModel`
+    /// — `@MainActor` porque lee `modelName` (ver doc ahí), así que los
+    /// llamadores externos necesitan `await refiner.currentModel`, igual que
+    /// con el actor de Whisper.
+    @MainActor public var currentModel: String { modelName }
 
     /// Inyecta (o quita, pasando `nil`) el proveedor del diccionario personal
     /// que se agrega al system prompt de `RefinePrompt`. Ver nota de
@@ -125,44 +146,35 @@ public final class LLMRefiner: Refining {
     ///   fallback de `WhisperTranscriber.prepare`). Puede dispararse desde
     ///   cualquier hilo — el llamador salta a MainActor antes de tocar UI.
     ///
-    /// F3 Task 2 — NO HAY `switchModel` todavía (análisis de sincronización,
-    /// ver también el doc de `modelContainer`/`dictionaryProvider` arriba):
-    /// `LLMRefiner` es una clase plana sin actor/lock/queue protegiendo
-    /// `modelContainer`/`isReady` — el diseño actual es seguro únicamente
-    /// porque son "write-once": `prepare()` los escribe UNA vez, antes de que
-    /// `refine()` (que corre en un executor arbitrario, fuera de MainActor,
-    /// ver doc de clase) pueda haberlos leído, y nunca se reescriben después.
-    /// Un `switchModel` real reescribiría `modelContainer` en caliente
-    /// mientras un `refine()` en vuelo podría estar leyéndolo — eso rompe la
-    /// invariante write-once que hace segura la ausencia de lock hoy, y el
-    /// archivo no tiene ningún primitivo existente (queue/lock/MainActor)
-    /// para reusar y hacer esa conmutación segura. Introducir uno nuevo
-    /// (p. ej. un `NSLock` ad hoc) no sería "seguir el patrón del archivo"
-    /// sino inventar uno — decisión de diseño que un humano debería revisar,
-    /// no asumir en silencio. Por eso este paso solo entrega el refactor
-    /// prepare→loadModel + `init(model:)` + `currentModel`; `switchModel` en
-    /// `LLMRefiner` queda BLOQUEADO — ver reporte de Task 2 para el análisis
-    /// completo y las opciones (actor, lock dedicado, o confinar todo a un
-    /// executor serial) que Task 3 debería decidir antes de exponer swap de
-    /// modelo del refinador en la UI.
+    /// F3 Task 2 (ronda de completion) — `switchModel` YA implementado, ver
+    /// más abajo. `modelContainer`/`modelName` se leen/escriben SIEMPRE vía
+    /// `await MainActor.run { ... }` (ver doc de `modelContainer` arriba) en
+    /// vez de acceso directo, así que el orden de las dos ramas (éxito /
+    /// fallback-a-base) queda serializado por MainActor sin importar en qué
+    /// executor arbitrario esté corriendo esta función.
     public func prepare(progressHandler: (@Sendable (Double) -> Void)? = nil) async throws {
         let started = Date()
+        let requestedModel = await MainActor.run { modelName }
         do {
-            modelContainer = try await loadModel(named: modelName, progressHandler: progressHandler)
-            KikiLog.log("kiki refine: modelo cargado (\(modelName)) en \(String(format: "%.1f", Date().timeIntervalSince(started)))s")
+            let container = try await loadModel(named: requestedModel, progressHandler: progressHandler)
+            await MainActor.run { self.modelContainer = container }
+            KikiLog.log("kiki refine: modelo cargado (\(requestedModel)) en \(String(format: "%.1f", Date().timeIntervalSince(started)))s")
         } catch {
-            KikiLog.log("kiki refine: \(modelName) no disponible (\(error))")
+            KikiLog.log("kiki refine: \(requestedModel) no disponible (\(error))")
             // F3 Task 2: mismo hop de fallback-a-base que `WhisperTranscriber.prepare`
             // — si el modelo preferido (no-base) falló, intentar el base ANTES
             // del fallback genérico. `preferredModel` es la constante que el
             // assert de consistencia de `AppDelegate` mantiene igual a
             // `ModelCatalog.baseOption(for: .refine).id`.
-            guard modelName != Self.preferredModel else {
+            guard requestedModel != Self.preferredModel else {
                 throw error
             }
             KikiLog.log("kiki refine: intentando modelo base (\(Self.preferredModel))")
-            modelContainer = try await loadModel(named: Self.preferredModel, progressHandler: progressHandler)
-            modelName = Self.preferredModel
+            let container = try await loadModel(named: Self.preferredModel, progressHandler: progressHandler)
+            await MainActor.run {
+                self.modelContainer = container
+                self.modelName = Self.preferredModel
+            }
             KikiLog.log("kiki refine: modelo base cargado en \(String(format: "%.1f", Date().timeIntervalSince(started)))s")
         }
         isReady = true
@@ -176,11 +188,30 @@ public final class LLMRefiner: Refining {
         GPU.set(cacheLimit: 20 * 1024 * 1024)
     }
 
+    /// F3: carga `model` y conmuta al terminar. El refine en vuelo (si hay)
+    /// conserva el contenedor anterior — snapshot al entrar; el siguiente
+    /// refine usa el nuevo. Si la carga falla, el activo queda intacto y el
+    /// error se propaga (la UI lo muestra; nada se persiste hasta el éxito).
+    /// No-op si `model` ya es el modelo activo (no dispara una recarga
+    /// idéntica). Nunca toca `isReady`: mirror exacto de
+    /// `WhisperTranscriber.switchModel` (ver doc ahí), adaptado al
+    /// confinamiento a `@MainActor` de `modelContainer`/`modelName` en vez de
+    /// aislamiento de actor completo.
+    public func switchModel(to model: String, progressHandler: (@Sendable (Double) -> Void)? = nil) async throws {
+        let current = await MainActor.run { modelName }
+        guard model != current else { return }
+        let container = try await loadModel(named: model, progressHandler: progressHandler)
+        await MainActor.run {
+            self.modelContainer = container
+            self.modelName = model
+        }
+        KikiLog.log("kiki refine: modelo conmutado a \(model)")
+    }
+
     /// Descarga (con progreso real vía `LLMModelFactory.loadContainer`) y
     /// carga `model` (parametrizado — F3 Task 2: extraído de `prepare` para
-    /// reusarlo en el fallback a base). Ver doc de `prepare` para el detalle
-    /// de la API de progreso y por qué no hay `switchModel` todavía que
-    /// también lo reuse.
+    /// reusarlo en el fallback a base y también en `switchModel`). Ver doc de
+    /// `prepare` para el detalle de la API de progreso.
     private func loadModel(
         named model: String,
         progressHandler: (@Sendable (Double) -> Void)?
@@ -198,7 +229,19 @@ public final class LLMRefiner: Refining {
     public func refine(
         _ text: String, profile: AppProfile, language: String = "es", translate: Bool = false
     ) async throws -> String {
-        guard isReady, let modelContainer else {
+        guard isReady else {
+            throw DictationError.transcriptionFailed("LLM no cargado")
+        }
+        // F3 Task 2 (ronda de completion) — snapshot al entrar, igual que
+        // `WhisperTranscriber.doTranscribe` con `whisperKit`: un
+        // `switchModel` que conmute MIENTRAS este `refine()` está en vuelo
+        // NO debe afectarlo — se lee `modelContainer` UNA sola vez aquí (vía
+        // el hop a MainActor donde vive, ver doc de la propiedad) y de ahí en
+        // adelante se usa solo la constante local `container`, nunca la
+        // propiedad. Semántica intencional: este refine termina con el
+        // contenedor viejo; el SIGUIENTE refine (que hará su propio snapshot)
+        // ya ve el nuevo.
+        guard let container = await MainActor.run(body: { self.modelContainer }) else {
             throw DictationError.transcriptionFailed("LLM no cargado")
         }
 
@@ -208,7 +251,7 @@ public final class LLMRefiner: Refining {
         let messages: [Chat.Message] = [.system(system), .user(user)]
 
         let started = Date()
-        let output = try await modelContainer.perform { context in
+        let output = try await container.perform { context in
             let userInput = UserInput(chat: messages)
             let input = try await context.processor.prepare(input: userInput)
 

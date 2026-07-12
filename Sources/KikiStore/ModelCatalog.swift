@@ -111,7 +111,14 @@ public enum ModelCatalog {
     public static func baseOption(for kind: ModelKind) -> ModelOption {
         // Precondition: each catalog is curated with exactly one `isBase` entry,
         // enforced by ModelCatalogTests.testCatalogsHaveThreeOptionsAndExactlyOneBase.
-        options(for: kind).first { $0.isBase }!
+        // Task 1 review triage: descriptive `preconditionFailure` instead of a
+        // silent force-unwrap crash, so a future catalog edit that drops the
+        // `isBase` entry fails with a clear message instead of an opaque
+        // "unexpectedly found nil".
+        guard let base = options(for: kind).first(where: { $0.isBase }) else {
+            preconditionFailure("catalog must have exactly one base option per kind")
+        }
+        return base
     }
 }
 
