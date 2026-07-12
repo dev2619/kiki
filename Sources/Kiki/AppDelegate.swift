@@ -855,9 +855,26 @@ extension AppDelegate: DictationControllerDelegate {
     /// También postea `.kikiDictationInserted` (Fase 3.6, Task 2) para que
     /// la pestaña Historial de Ajustes se refresque en vivo si la ventana
     /// está abierta — `SettingsViewModel` es quien observa esta notificación.
+    ///
+    /// F2 fix (2026-07-12): toast de confirmación de portapapeles. Bug de
+    /// campo — el usuario no tenía ninguna señal de que el texto quedó
+    /// disponible para pegar, solo el chime de `SoundCues.play(.inserted)`
+    /// (fácil de perderse/ignorar). `hud.showTransient` ya existe (pill
+    /// autolimpiable a 1.2s, con precedencia sobre la burbuja live — que para
+    /// este punto ya se limpió, ver `dictationLivePartialDidChange(nil)` en
+    /// el camino de `finish`/`cancel`) así que no hace falta UI nueva. El
+    /// texto depende de si el clipboard va a conservar la transcripción:
+    /// `PasteInserter` (ver su construcción arriba) restaura el clipboard
+    /// previo ~0.4s después del paste cuando el toggle
+    /// `restoreClipboardDefaultsKey` está en `true` — en ese caso el texto YA
+    /// NO queda disponible para pegar de nuevo, así que el toast NO promete
+    /// portapapeles.
     func dictationDidInsert() {
         SoundCues.play(.inserted)
         NotificationCenter.default.post(name: .kikiDictationInserted, object: nil)
+        let restoresClipboard = UserDefaults.standard.bool(
+            forKey: SettingsViewModel.restoreClipboardDefaultsKey)
+        hud.showTransient(restoresClipboard ? "✓ Insertado" : "✓ Insertado — en tu portapapeles")
     }
 
     /// F1 Task 5: parciales del flujo HOTKEY (`DictationController.liveChunk`
