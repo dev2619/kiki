@@ -40,6 +40,11 @@ final class HUDController {
 
     func show(state: DictationState) {
         model.state = state
+        // Defensa: un caller que llegue a idle sin updateLiveText(nil) no debe
+        // filtrar el texto de la sesión anterior a la próxima burbuja.
+        if case .idle = state {
+            model.liveText = nil
+        }
         resizeForCurrentContent()
         switch state {
         case .idle:
@@ -89,8 +94,13 @@ final class HUDController {
     func updateLiveText(_ text: String?) {
         model.liveText = text
         resizeForCurrentContent()
-        if text != nil {
-            positionAtBottomCenter()
+        // Reposicionar SIEMPRE: setContentSize ancla arriba-izquierda; encoger
+        // sin reposicionar deja el pill corrido (finding review F1 T4).
+        positionAtBottomCenter()
+        // Solo mostrar si el texto es no-nil o el estado lo requiere.
+        let shouldShow = text != nil || model.state == .recording
+            || model.state == .processing || model.armed
+        if shouldShow {
             panel.orderFrontRegardless()
         }
     }
