@@ -63,6 +63,22 @@ public final class LiveTranscriptionCoordinator {
     /// `true` tras el primer `finish()` completado — evita un segundo pase
     /// final si algún llamador invoca `finish()` más de una vez.
     private var isFinished = false
+    /// `true` desde el momento en que `finish()` arranca (ANTES de esperar
+    /// un pase en vuelo), hasta que termina. Bloquea únicamente el
+    /// ENCADENAMIENTO de nuevos pases (`maybeStartPass`, incluido el que
+    /// dispara `handlePassCompletion` del pase que `finish()` está
+    /// esperando) — `append` sigue acumulando buffer con total normalidad,
+    /// así el pase final de `finish()` sigue viendo el buffer COMPLETO.
+    ///
+    /// Sin esto: si el pase en vuelo que `finish()` espera completa con
+    /// suficiente audio nuevo ya acumulado, su propio `handlePassCompletion`
+    /// encadenaría un pase nuevo (`maybeStartPass`) ANTES de que `finish()`
+    /// alcance a fijar `isFinished` — ese pase nuevo quedaría corriendo en
+    /// paralelo con el pase final que `finish()` arranca a continuación
+    /// (doble transcripción concurrente), y su completion podría disparar un
+    /// `onPartial` DESPUÉS de que `finish()` ya retornó — violando "tras
+    /// `finish()`, no vuelve a dispararse `onPartial`".
+    private var isFinishing = false
 
     private var currentPassTask: Task<Void, Never>?
     /// Momento en que arrancó el ÚLTIMO pase lanzado (no el último
@@ -111,6 +127,7 @@ public final class LiveTranscriptionCoordinator {
     public func finish() async -> String {
         guard !isCancelled else { return "" }
         guard !isFinished else { return lastNonEmptyPartial }
+        isFinishing = true
         let capturedGeneration = generation
         if let inFlight = currentPassTask {
             await inFlight.value
@@ -147,7 +164,7 @@ public final class LiveTranscriptionCoordinator {
     // MARK: - Pass scheduling
 
     private func maybeStartPass() {
-        guard !isCancelled, !isFinished, currentPassTask == nil else { return }
+        guard !isCancelled, !isFinished, !isFinishing, currentPassTask == nil else { return }
         let newAudio = buffer.count - sampleCountAtLastPassStart
         guard newAudio >= minNewAudioSamples else { return }
         guard now().timeIntervalSince(lastPassStart) >= minPassInterval else { return }

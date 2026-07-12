@@ -254,6 +254,55 @@ final class LiveTranscriptionCoordinatorTests: XCTestCase {
         XCTAssertEqual(finishResult, "first partial", "when the final pass throws, finish() must fall back to the last non-empty partial")
     }
 
+    // MARK: (self-review regression) finish() must suppress chaining triggered
+    // by the in-flight pass it's waiting on — otherwise a second background
+    // pass could launch concurrently with finish()'s own final pass and
+    // deliver a stray onPartial after finish() has already returned.
+
+    func test_finishSuppressesChainingFromTheInFlightPassItWaitsOn() {
+        let transcriber = MockLiveTranscriber()
+        transcriber.delaySeconds = 0.1
+        transcriber.scriptedTexts = ["partial pass", "final pass text"]
+        let nowBox = MutableNow()
+        let coordinator = LiveTranscriptionCoordinator(
+            transcriber: transcriber, minPassInterval: 0, minNewAudioSeconds: 0.4,
+            sampleRate: 16_000, now: nowBox.now)
+        coordinator.start()
+
+        var partials: [String] = []
+        coordinator.onPartial = { partials.append($0) }
+
+        let firstCallStarted = expectation(description: "first pass started")
+        transcriber.onCallStarted = { index in if index == 1 { firstCallStarted.fulfill() } }
+        coordinator.append(samples(count: 6_400))
+        wait(for: [firstCallStarted], timeout: 1.0)
+
+        // Enough new audio arrives while pass1 is in flight to satisfy the
+        // chaining condition (minPassInterval is 0) once pass1 completes —
+        // the exact condition that used to race with finish()'s own final pass.
+        coordinator.append(samples(count: 6_400)) // total 12_800
+
+        var finishResult: String?
+        let finishExpectation = expectation(description: "finish completes")
+        Task { @MainActor in
+            finishResult = await coordinator.finish()
+            finishExpectation.fulfill()
+        }
+        wait(for: [finishExpectation], timeout: 2.0)
+
+        XCTAssertEqual(finishResult, "final pass text")
+        XCTAssertEqual(transcriber.callCount, 2, "finish() must run exactly one final pass — no extra chained pass")
+        XCTAssertEqual(transcriber.receivedSamples[1].count, 12_800, "the final pass must cover the full buffer")
+        XCTAssertEqual(partials, ["partial pass"], "only the in-flight pass's own partial fires — no onPartial after finish()")
+
+        // Give any (erroneous) chained pass a chance to complete and misfire.
+        let settle = expectation(description: "settle after finish")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { settle.fulfill() }
+        wait(for: [settle], timeout: 1.0)
+        XCTAssertEqual(transcriber.callCount, 2, "no pass may launch after finish() completes")
+        XCTAssertEqual(partials, ["partial pass"], "no onPartial may fire after finish() completes")
+    }
+
     // MARK: (7) cancel() → onPartial no vuelve a dispararse ni finish pendiente entrega
 
     func test_cancelStopsFuturePartialsAndPendingFinish() async {
