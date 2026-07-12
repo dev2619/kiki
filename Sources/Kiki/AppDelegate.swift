@@ -64,16 +64,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private(set) var controller: DictationController!
     let recorder = AudioRecorder()
-    let transcriber = WhisperTranscriber()
+    /// F3 Task 2: construido con la preferencia efectiva del usuario (cae al
+    /// modelo base si no hay preferencia guardada o si quedó inválida — ver
+    /// `ModelPreference.effectiveModelId`), no con `WhisperTranscriber.preferredModel`
+    /// a secas.
+    let transcriber = WhisperTranscriber(model: ModelPreference.effectiveModelId(for: .stt))
     /// Verificador tiny de la frase de activación (F4). Se prepara en
     /// background DESPUÉS de los modelos principales (75MB, sin UI de
     /// progreso); hasta que está listo — o si falla — WakeListener verifica
-    /// con `transcriber` (fallback = comportamiento pre-F4).
+    /// con `transcriber` (fallback = comportamiento pre-F4). No participa de
+    /// `ModelPreference` (variante fija, no seleccionable por el usuario).
     let wakeTranscriber = WhisperTranscriber(model: WhisperTranscriber.wakeModel)
     /// Retención fuerte del bias provider del tiny (el transcriber lo guarda
     /// weak — mismo patrón que los adapters de personalización).
     private let wakePhraseBias = WakePhraseBiasProvider()
-    let refiner = LLMRefiner()
+    /// F3 Task 2: mismo patrón que `transcriber` — preferencia efectiva del
+    /// usuario, con fallback al modelo base.
+    let refiner = LLMRefiner(model: ModelPreference.effectiveModelId(for: .refine))
     let appContext = FrontmostAppContext()
     private var hotkey: HotkeyMonitor!
     private var escMonitor: EscMonitor!
@@ -124,6 +131,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var modelLoadProgressWindowController: ModelLoadProgressWindowController!
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // F3 Task 2: consistencia catálogo↔constantes — atrapa en debug si
+        // `ModelCatalog`'s `isBase` entry (Task 1) alguna vez se desincroniza
+        // de la constante `preferredModel` hardcodeada en cada engine (la que
+        // usa el fallback-a-base de `prepare()`, ver `WhisperTranscriber`/
+        // `LLMRefiner`). `transcriber`/`refiner` ya se construyeron arriba
+        // (stored properties) antes de que este método corra, así que estos
+        // asserts solo verifican consistencia — no afectan qué modelo cargó
+        // cada instancia.
+        assert(ModelCatalog.baseOption(for: .stt).id == WhisperTranscriber.preferredModel)
+        assert(ModelCatalog.baseOption(for: .refine).id == LLMRefiner.preferredModel)
+
         Permissions.requestMicrophoneAccess()
         Permissions.ensureAccessibility()
 

@@ -240,11 +240,17 @@ public actor WhisperTranscriber: Transcribing, LanguageDetecting {
 
     /// Variante de whisperkit-coreml que carga esta instancia. La app usa
     /// dos: el modelo principal de dictado (default) y el tiny del wake.
-    private let modelName: String
+    /// `private(set)` (F3 Task 2): `switchModel` la actualiza tras conmutar
+    /// con éxito; fuera de este actor solo se lee vía `currentModel`.
+    private(set) var modelName: String
 
     public init(model: String = WhisperTranscriber.preferredModel) {
         self.modelName = model
     }
+
+    /// Modelo whisperkit-coreml actualmente activo (el que sirve
+    /// `transcribe`), tras la última carga o conmutación exitosa.
+    public var currentModel: String { modelName }
 
     /// Inyecta (o quita, pasando `nil`) el proveedor del diccionario personal
     /// que se usará como initial prompt de Whisper. Es un método aislado al
@@ -281,15 +287,40 @@ public actor WhisperTranscriber: Transcribing, LanguageDetecting {
     public func prepare(progressHandler: (@Sendable (Double) -> Void)? = nil) async throws {
         let started = Date()
         do {
-            whisperKit = try await loadModel(progressHandler: progressHandler)
+            whisperKit = try await loadModel(named: modelName, progressHandler: progressHandler)
             KikiLog.log("kiki stt: modelo cargado (\(modelName)) en \(String(format: "%.1f", Date().timeIntervalSince(started)))s")
         } catch {
-            KikiLog.log("kiki stt: \(modelName) no disponible (\(error)); usando modelo recomendado")
+            KikiLog.log("kiki stt: \(modelName) no disponible (\(error))")
+            // F3 Task 2: si el modelo preferido (no-base) falló, intentar el
+            // base ANTES del fallback genérico de abajo — cubre el caso en
+            // que la preferencia SÍ está en catálogo pero su descarga/carga
+            // falla en runtime (el resolver de `ModelPreference` ya cae al
+            // base cuando la preferencia ni siquiera está en catálogo; este
+            // hop cubre el residuo). `preferredModel` es la constante que el
+            // assert de consistencia de `AppDelegate` mantiene igual a
+            // `ModelCatalog.baseOption(for: .stt).id`, así que comparar
+            // contra ella (en vez de importar KikiStore aquí) evita acoplar
+            // este target a KikiStore solo por esto.
+            if modelName != Self.preferredModel {
+                KikiLog.log("kiki stt: intentando modelo base (\(Self.preferredModel))")
+                do {
+                    whisperKit = try await loadModel(named: Self.preferredModel, progressHandler: progressHandler)
+                    modelName = Self.preferredModel
+                    KikiLog.log("kiki stt: modelo base cargado en \(String(format: "%.1f", Date().timeIntervalSince(started)))s")
+                    isReady = true
+                    return
+                } catch {
+                    KikiLog.log("kiki stt: modelo base \(Self.preferredModel) tampoco disponible (\(error)); usando modelo recomendado")
+                }
+            } else {
+                KikiLog.log("kiki stt: usando modelo recomendado")
+            }
             // Camino de fallback (recomendado remoto): WhisperKit no expone
             // progreso granular aquí tampoco (mismo límite de API, ver doc de
             // `loadModel`) y es una rama rara (solo si el variant
-            // preferido no resuelve) — se reporta 1.0 directo al terminar
-            // para que la fase no quede pegada por debajo de 100% en la UI.
+            // preferido y el base no resuelven) — se reporta 1.0 directo al
+            // terminar para que la fase no quede pegada por debajo de 100%
+            // en la UI.
             whisperKit = try await WhisperKit()
             progressHandler?(1.0)
             KikiLog.log("kiki stt: modelo recomendado cargado en \(String(format: "%.1f", Date().timeIntervalSince(started)))s")
@@ -297,9 +328,25 @@ public actor WhisperTranscriber: Transcribing, LanguageDetecting {
         isReady = true
     }
 
+    /// F3 Task 2: carga `model` (descargando si hace falta, con prewarm) y
+    /// conmuta al terminar. El modelo activo sigue sirviendo transcripciones
+    /// mientras tanto (la conmutación es el último paso). Si falla, el
+    /// activo queda intacto y el error se propaga al caller (la UI lo
+    /// muestra; nada se persiste hasta el éxito). No toca `isReady`: sigue
+    /// `true` con el modelo viejo hasta que la conmutación se completa.
+    public func switchModel(to model: String, progressHandler: (@Sendable (Double) -> Void)? = nil) async throws {
+        guard model != modelName else { return }
+        let newKit = try await loadModel(named: model, progressHandler: progressHandler)
+        whisperKit = newKit
+        modelName = model
+        KikiLog.log("kiki stt: modelo conmutado a \(model)")
+    }
+
     /// Descarga (con progreso real de Hugging Face vía `WhisperKit.download`)
-    /// y luego prewarm+load `modelName` (el modelo de esta instancia),
-    /// reportando progreso 0...1 de ESTA fase a `progressHandler`.
+    /// y luego prewarm+load `model` (parametrizado — F3 Task 2: extraído de
+    /// `prepare` para que también lo reuse `switchModel` y el fallback a
+    /// base, no solo el modelo por-instancia), reportando progreso 0...1 de
+    /// ESTA fase a `progressHandler`.
     ///
     /// Separado en dos pasos en vez del atajo de un solo
     /// `WhisperKit(WhisperKitConfig(model:prewarm:))` (lo que hacía este
@@ -320,14 +367,15 @@ public actor WhisperTranscriber: Transcribing, LanguageDetecting {
     ///    captura las transiciones `.prewarming → .prewarmed → .loading →
     ///    .loaded` (`ArgmaxCore/ModelState.swift`) de esta carga.
     private func loadModel(
+        named model: String,
         progressHandler: (@Sendable (Double) -> Void)?
     ) async throws -> WhisperKit {
-        let modelFolder = try await WhisperKit.download(variant: modelName) { progress in
+        let modelFolder = try await WhisperKit.download(variant: model) { progress in
             progressHandler?(progress.fractionCompleted * Self.downloadPhaseWeight)
         }
 
         let kit = try await WhisperKit(WhisperKitConfig(
-            model: modelName,
+            model: model,
             modelFolder: modelFolder.path,
             prewarm: false,
             load: false))

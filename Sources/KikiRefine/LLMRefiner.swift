@@ -64,6 +64,15 @@ public final class LLMRefiner: Refining {
     private var modelContainer: ModelContainer?
     public private(set) var isReady = false
 
+    /// Identificador del modelo MLX que carga esta instancia (F3 Task 2 —
+    /// mirror de `WhisperTranscriber.modelName`). Sin `switchModel` (ver
+    /// análisis de sincronización en `prepare`/init doc), esta propiedad solo
+    /// se reasigna dentro de `prepare()` — antes de que `isReady` sea `true`
+    /// y por tanto antes de que ningún `refine()` pueda haberla leído — así
+    /// que mutarla ahí no reintroduce la carrera que motivó no implementar
+    /// `switchModel` todavía.
+    private(set) var modelName: String
+
     /// Diccionario personal del usuario (Fase 3, Task 3/4).
     ///
     /// Contrato de threading: a diferencia de `WhisperTranscriber` (actor),
@@ -83,7 +92,15 @@ public final class LLMRefiner: Refining {
     /// en `WhisperTranscriber`.
     private weak var dictionaryProvider: DictionaryProviding?
 
-    public init() {}
+    /// - Parameter model: variante MLX a cargar (F3 Task 2 — mirror de
+    ///   `WhisperTranscriber.init(model:)`); default `preferredModel`.
+    public init(model: String = LLMRefiner.preferredModel) {
+        self.modelName = model
+    }
+
+    /// Modelo MLX actualmente activo (el que sirve `refine`), tras la última
+    /// carga exitosa. Mirror de `WhisperTranscriber.currentModel`.
+    public var currentModel: String { modelName }
 
     /// Inyecta (o quita, pasando `nil`) el proveedor del diccionario personal
     /// que se agrega al system prompt de `RefinePrompt`. Ver nota de
@@ -107,15 +124,47 @@ public final class LLMRefiner: Refining {
     ///   fuerza `progressHandler?(1.0)` al terminar (mismo patrón que el
     ///   fallback de `WhisperTranscriber.prepare`). Puede dispararse desde
     ///   cualquier hilo — el llamador salta a MainActor antes de tocar UI.
+    ///
+    /// F3 Task 2 — NO HAY `switchModel` todavía (análisis de sincronización,
+    /// ver también el doc de `modelContainer`/`dictionaryProvider` arriba):
+    /// `LLMRefiner` es una clase plana sin actor/lock/queue protegiendo
+    /// `modelContainer`/`isReady` — el diseño actual es seguro únicamente
+    /// porque son "write-once": `prepare()` los escribe UNA vez, antes de que
+    /// `refine()` (que corre en un executor arbitrario, fuera de MainActor,
+    /// ver doc de clase) pueda haberlos leído, y nunca se reescriben después.
+    /// Un `switchModel` real reescribiría `modelContainer` en caliente
+    /// mientras un `refine()` en vuelo podría estar leyéndolo — eso rompe la
+    /// invariante write-once que hace segura la ausencia de lock hoy, y el
+    /// archivo no tiene ningún primitivo existente (queue/lock/MainActor)
+    /// para reusar y hacer esa conmutación segura. Introducir uno nuevo
+    /// (p. ej. un `NSLock` ad hoc) no sería "seguir el patrón del archivo"
+    /// sino inventar uno — decisión de diseño que un humano debería revisar,
+    /// no asumir en silencio. Por eso este paso solo entrega el refactor
+    /// prepare→loadModel + `init(model:)` + `currentModel`; `switchModel` en
+    /// `LLMRefiner` queda BLOQUEADO — ver reporte de Task 2 para el análisis
+    /// completo y las opciones (actor, lock dedicado, o confinar todo a un
+    /// executor serial) que Task 3 debería decidir antes de exponer swap de
+    /// modelo del refinador en la UI.
     public func prepare(progressHandler: (@Sendable (Double) -> Void)? = nil) async throws {
         let started = Date()
-        let configuration = ModelConfiguration(id: Self.preferredModel)
-        modelContainer = try await LLMModelFactory.shared.loadContainer(
-            configuration: configuration,
-            progressHandler: { progress in
-                progressHandler?(progress.fractionCompleted)
-            })
-        progressHandler?(1.0)
+        do {
+            modelContainer = try await loadModel(named: modelName, progressHandler: progressHandler)
+            KikiLog.log("kiki refine: modelo cargado (\(modelName)) en \(String(format: "%.1f", Date().timeIntervalSince(started)))s")
+        } catch {
+            KikiLog.log("kiki refine: \(modelName) no disponible (\(error))")
+            // F3 Task 2: mismo hop de fallback-a-base que `WhisperTranscriber.prepare`
+            // — si el modelo preferido (no-base) falló, intentar el base ANTES
+            // del fallback genérico. `preferredModel` es la constante que el
+            // assert de consistencia de `AppDelegate` mantiene igual a
+            // `ModelCatalog.baseOption(for: .refine).id`.
+            guard modelName != Self.preferredModel else {
+                throw error
+            }
+            KikiLog.log("kiki refine: intentando modelo base (\(Self.preferredModel))")
+            modelContainer = try await loadModel(named: Self.preferredModel, progressHandler: progressHandler)
+            modelName = Self.preferredModel
+            KikiLog.log("kiki refine: modelo base cargado en \(String(format: "%.1f", Date().timeIntervalSince(started)))s")
+        }
         isReady = true
 
         // Límite de cache de buffers de MLX: se fija una sola vez al cargar el
@@ -125,8 +174,25 @@ public final class LLMRefiner: Refining {
         // generoso para las activaciones de una generación de texto corto
         // (≤512 tokens).
         GPU.set(cacheLimit: 20 * 1024 * 1024)
+    }
 
-        KikiLog.log("kiki refine: modelo cargado (\(Self.preferredModel)) en \(String(format: "%.1f", Date().timeIntervalSince(started)))s")
+    /// Descarga (con progreso real vía `LLMModelFactory.loadContainer`) y
+    /// carga `model` (parametrizado — F3 Task 2: extraído de `prepare` para
+    /// reusarlo en el fallback a base). Ver doc de `prepare` para el detalle
+    /// de la API de progreso y por qué no hay `switchModel` todavía que
+    /// también lo reuse.
+    private func loadModel(
+        named model: String,
+        progressHandler: (@Sendable (Double) -> Void)?
+    ) async throws -> ModelContainer {
+        let configuration = ModelConfiguration(id: model)
+        let container = try await LLMModelFactory.shared.loadContainer(
+            configuration: configuration,
+            progressHandler: { progress in
+                progressHandler?(progress.fractionCompleted)
+            })
+        progressHandler?(1.0)
+        return container
     }
 
     public func refine(
