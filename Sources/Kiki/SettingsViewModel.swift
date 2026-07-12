@@ -252,8 +252,13 @@ final class SettingsViewModel: ObservableObject {
     // duplicar los strings a mano, para no desincronizarse si cambian.
     let hotkeyDescription = "Fn (mantener presionada mientras hablas)"
     let wakePhrasesDescription = WakePhraseMatcher.phrases.joined(separator: "  /  ")
-    let sttModelDescription = WhisperTranscriber.preferredModel
-    let refineModelDescription = LLMRefiner.preferredModel
+
+    // Deriva de la preferencia persistida + catálogo (no de las constantes
+    // de compile-time): con el gestor de Modelos (F3) el modelo activo puede
+    // divergir del base, y esta etiqueta debe coincidir con la sección
+    // Modelos de la misma ventana.
+    @Published var sttModelDescription: String
+    @Published var refineModelDescription: String
 
     private static let settingsSectionKey = "kiki.settingsSection"
 
@@ -297,6 +302,8 @@ final class SettingsViewModel: ObservableObject {
         // intención del usuario y la fuente de verdad persistida.
         self.sttRows = Self.initialRows(for: .stt)
         self.refineRows = Self.initialRows(for: .refine)
+        self.sttModelDescription = Self.modelDescription(for: .stt)
+        self.refineModelDescription = Self.modelDescription(for: .refine)
 
         let defaults = UserDefaults.standard
         self.soundCuesEnabled = defaults.object(forKey: SoundCues.enabledDefaultsKey) != nil
@@ -437,6 +444,14 @@ final class SettingsViewModel: ObservableObject {
         }
     }
 
+    /// Derives a user-facing description from the persisted preference + catalog.
+    /// Returns displayName + sizeLabel, or falls back to the id if not found.
+    private static func modelDescription(for kind: ModelKind) -> String {
+        let id = ModelPreference.effectiveModelId(for: kind)
+        let option = ModelCatalog.options(for: kind).first { $0.id == id }
+        return option.map { "\($0.displayName) (\($0.sizeLabel))" } ?? id
+    }
+
     private func rows(for kind: ModelKind) -> [ModelRowState] {
         switch kind {
         case .stt: return sttRows
@@ -539,6 +554,11 @@ final class SettingsViewModel: ObservableObject {
                         return updated
                     },
                     for: kind)
+                // Refresh the description to match the activated model
+                switch kind {
+                case .stt: self.sttModelDescription = Self.modelDescription(for: .stt)
+                case .refine: self.refineModelDescription = Self.modelDescription(for: .refine)
+                }
                 KikiLog.log("kiki app: modelo \(kind.rawValue) activado desde Ajustes — \(optionId)")
             } catch {
                 self.updateRow(id: optionId, kind: kind) { row in
