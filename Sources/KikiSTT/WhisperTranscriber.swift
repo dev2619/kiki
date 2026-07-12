@@ -286,11 +286,31 @@ public actor WhisperTranscriber: Transcribing, LanguageDetecting {
     ///   saltar a MainActor antes de tocar UI.
     public func prepare(progressHandler: (@Sendable (Double) -> Void)? = nil) async throws {
         let started = Date()
+        // Snapshot del modelo pedido al ENTRAR: `loadModel` suspende (descarga
+        // + prewarm + load) y en esa ventana `switchModel` puede correr y
+        // conmutar `modelName`/`whisperKit` a otro modelo elegido desde
+        // Settings. Si al volver asignáramos ciegamente el kit recién cargado,
+        // sobrescribiríamos el kit YA conmutado mientras `modelName` sigue
+        // apuntando al nuevo — el engine serviría el modelo viejo con la UI
+        // creyendo que sirve el nuevo. Se compara contra este snapshot (no
+        // contra una relectura de `modelName`) tras cada `loadModel` para
+        // detectar y descartar esa carrera.
+        let requestedModel = modelName
         do {
-            whisperKit = try await loadModel(named: modelName, progressHandler: progressHandler)
-            KikiLog.log("kiki stt: modelo cargado (\(modelName)) en \(String(format: "%.1f", Date().timeIntervalSince(started)))s")
+            let kit = try await loadModel(named: requestedModel, progressHandler: progressHandler)
+            guard modelName == requestedModel else {
+                // switchModel ya conmutó a otro modelo mientras esta carga
+                // estaba en vuelo: el engine YA está listo (sirviendo el
+                // modelo conmutado) — se descarta este kit obsoleto sin
+                // tocar whisperKit/modelName.
+                KikiLog.log("kiki stt: prepare descartado — switchModel conmutó a \(modelName) durante la carga")
+                isReady = true
+                return
+            }
+            whisperKit = kit
+            KikiLog.log("kiki stt: modelo cargado (\(requestedModel)) en \(String(format: "%.1f", Date().timeIntervalSince(started)))s")
         } catch {
-            KikiLog.log("kiki stt: \(modelName) no disponible (\(error))")
+            KikiLog.log("kiki stt: \(requestedModel) no disponible (\(error))")
             // F3 Task 2 (ronda de completion) — guard del verificador wake:
             // NI el hop de fallback a base NI el fallback genérico de abajo
             // deben aplicar cuando esta instancia es el verificador tiny del
@@ -309,8 +329,8 @@ public actor WhisperTranscriber: Transcribing, LanguageDetecting {
             // estrictamente mejor: cero costo extra, mismo resultado
             // funcional. Por eso, para el wake, el error se propaga tal cual
             // sin intentar ningún hop.
-            guard modelName != Self.wakeModel else {
-                KikiLog.log("kiki stt: modelo wake (\(modelName)) no disponible; sin fallback a base ni al recomendado (evitar 1GB+ extra en RAM solo para el verificador) — AppDelegate sigue verificando con el transcriber principal")
+            guard requestedModel != Self.wakeModel else {
+                KikiLog.log("kiki stt: modelo wake (\(requestedModel)) no disponible; sin fallback a base ni al recomendado (evitar 1GB+ extra en RAM solo para el verificador) — AppDelegate sigue verificando con el transcriber principal")
                 throw error
             }
             // F3 Task 2: si el modelo preferido (no-base) falló, intentar el
@@ -323,10 +343,20 @@ public actor WhisperTranscriber: Transcribing, LanguageDetecting {
             // `ModelCatalog.baseOption(for: .stt).id`, así que comparar
             // contra ella (en vez de importar KikiStore aquí) evita acoplar
             // este target a KikiStore solo por esto.
-            if modelName != Self.preferredModel {
+            if requestedModel != Self.preferredModel {
                 KikiLog.log("kiki stt: intentando modelo base (\(Self.preferredModel))")
                 do {
-                    whisperKit = try await loadModel(named: Self.preferredModel, progressHandler: progressHandler)
+                    let baseKit = try await loadModel(named: Self.preferredModel, progressHandler: progressHandler)
+                    // Mismo guard de carrera que el camino preferido arriba:
+                    // si switchModel conmutó a otro modelo mientras este hop
+                    // a base estaba en vuelo, se descarta el kit del hop en
+                    // vez de pisar el que switchModel ya dejó activo.
+                    guard modelName == Self.preferredModel else {
+                        KikiLog.log("kiki stt: prepare descartado — switchModel conmutó a \(modelName) durante la carga")
+                        isReady = true
+                        return
+                    }
+                    whisperKit = baseKit
                     modelName = Self.preferredModel
                     KikiLog.log("kiki stt: modelo base cargado en \(String(format: "%.1f", Date().timeIntervalSince(started)))s")
                     isReady = true

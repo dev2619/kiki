@@ -84,6 +84,20 @@ public final class LLMRefiner: Refining {
     @MainActor private var modelContainer: ModelContainer?
     public private(set) var isReady = false
 
+    /// Límite de cache de buffers de MLX aplicado una sola vez por proceso
+    /// (ver doc de `applyGPUCacheLimitIfNeeded`). `@MainActor`-confinado por
+    /// el mismo motivo que `modelContainer`/`modelName` arriba: tanto
+    /// `prepare()` como `switchModel()` pueden llegar a aplicarlo, y sin este
+    /// confinamiento dos éxitos concurrentes (p. ej. un `switchModel` que
+    /// termina mientras `prepare()` sigue en su propio camino de éxito)
+    /// podrían leer/escribir la bandera sin sincronización.
+    @MainActor private var gpuCacheLimitApplied = false
+
+    /// Bytes del límite de cache de buffers de MLX (ver doc de
+    /// `applyGPUCacheLimitIfNeeded`). 20MB es generoso para las activaciones
+    /// de una generación de texto corto (≤512 tokens).
+    private static let gpuCacheLimitBytes = 20 * 1024 * 1024
+
     /// Identificador del modelo MLX que carga esta instancia (F3 Task 2 —
     /// mirror de `WhisperTranscriber.modelName`). `@MainActor` por el mismo
     /// motivo que `modelContainer` arriba — ver esa doc. Se reasigna dentro
@@ -154,10 +168,27 @@ public final class LLMRefiner: Refining {
     /// executor arbitrario esté corriendo esta función.
     public func prepare(progressHandler: (@Sendable (Double) -> Void)? = nil) async throws {
         let started = Date()
+        // Snapshot al entrar (ver nota equivalente en
+        // `WhisperTranscriber.prepare`): `loadModel` suspende y en esa
+        // ventana `switchModel` puede conmutar `modelContainer`/`modelName` a
+        // otro modelo. Cada asignación de abajo compara contra este snapshot
+        // (dentro del mismo `MainActor.run`, atómico con la lectura) para
+        // detectar esa carrera y descartar el container obsoleto en vez de
+        // pisar el que `switchModel` ya dejó activo.
         let requestedModel = await MainActor.run { modelName }
         do {
             let container = try await loadModel(named: requestedModel, progressHandler: progressHandler)
-            await MainActor.run { self.modelContainer = container }
+            let switchedTo = await MainActor.run { () -> String? in
+                guard modelName == requestedModel else { return modelName }
+                self.modelContainer = container
+                return nil
+            }
+            if let switchedTo {
+                KikiLog.log("kiki refine: prepare descartado — switchModel conmutó a \(switchedTo) durante la carga")
+                isReady = true
+                await applyGPUCacheLimitIfNeeded()
+                return
+            }
             KikiLog.log("kiki refine: modelo cargado (\(requestedModel)) en \(String(format: "%.1f", Date().timeIntervalSince(started)))s")
         } catch {
             KikiLog.log("kiki refine: \(requestedModel) no disponible (\(error))")
@@ -171,21 +202,35 @@ public final class LLMRefiner: Refining {
             }
             KikiLog.log("kiki refine: intentando modelo base (\(Self.preferredModel))")
             let container = try await loadModel(named: Self.preferredModel, progressHandler: progressHandler)
-            await MainActor.run {
+            let switchedTo = await MainActor.run { () -> String? in
+                guard modelName == Self.preferredModel else { return modelName }
                 self.modelContainer = container
                 self.modelName = Self.preferredModel
+                return nil
+            }
+            if let switchedTo {
+                KikiLog.log("kiki refine: prepare descartado — switchModel conmutó a \(switchedTo) durante la carga")
+                isReady = true
+                await applyGPUCacheLimitIfNeeded()
+                return
             }
             KikiLog.log("kiki refine: modelo base cargado en \(String(format: "%.1f", Date().timeIntervalSince(started)))s")
         }
         isReady = true
+        await applyGPUCacheLimitIfNeeded()
+    }
 
-        // Límite de cache de buffers de MLX: se fija una sola vez al cargar el
-        // modelo (no en cada refine()) — kiki es una app de fondo de larga
-        // duración (no un proceso CLI de un solo uso), así que el límite debe
-        // regir para todo el proceso, no resetearse por dictado. 20MB es
-        // generoso para las activaciones de una generación de texto corto
-        // (≤512 tokens).
-        GPU.set(cacheLimit: 20 * 1024 * 1024)
+    /// Fija `GPU.set(cacheLimit:)` una sola vez por proceso (idempotente: una
+    /// segunda llamada es un no-op). Extraído de `prepare()` para que
+    /// `switchModel()` también pueda dejar el engine plenamente operativo
+    /// (Fix 3, ronda de revisión final) cuando su éxito es lo que primero
+    /// deja el refinador listo (p. ej. un `prepare()` inicial que falló del
+    /// todo, seguido de un `switchModel` exitoso desde Settings).
+    @MainActor
+    private func applyGPUCacheLimitIfNeeded() {
+        guard !gpuCacheLimitApplied else { return }
+        GPU.set(cacheLimit: Self.gpuCacheLimitBytes)
+        gpuCacheLimitApplied = true
     }
 
     /// F3: carga `model` y conmuta al terminar. El refine en vuelo (si hay)
@@ -193,10 +238,13 @@ public final class LLMRefiner: Refining {
     /// refine usa el nuevo. Si la carga falla, el activo queda intacto y el
     /// error se propaga (la UI lo muestra; nada se persiste hasta el éxito).
     /// No-op si `model` ya es el modelo activo (no dispara una recarga
-    /// idéntica). Nunca toca `isReady`: mirror exacto de
-    /// `WhisperTranscriber.switchModel` (ver doc ahí), adaptado al
+    /// idéntica) — ese camino no toca `isReady` ni el límite de cache de MLX.
+    /// Mirror de `WhisperTranscriber.switchModel` (ver doc ahí), adaptado al
     /// confinamiento a `@MainActor` de `modelContainer`/`modelName` en vez de
-    /// aislamiento de actor completo.
+    /// aislamiento de actor completo. Fix 3 (ronda de revisión final): el
+    /// camino de éxito SÍ marca `isReady = true` y aplica el límite de cache
+    /// de GPU (si no se aplicó ya) — una conmutación exitosa debe dejar el
+    /// refinador funcional aunque el `prepare()` de arranque haya fallado.
     public func switchModel(to model: String, progressHandler: (@Sendable (Double) -> Void)? = nil) async throws {
         let current = await MainActor.run { modelName }
         guard model != current else { return }
@@ -205,6 +253,13 @@ public final class LLMRefiner: Refining {
             self.modelContainer = container
             self.modelName = model
         }
+        // Fix 3 (ronda de revisión final): una conmutación exitosa deja el
+        // refinador funcional de punta a punta, incluso si el `prepare()` de
+        // arranque había fallado del todo (isReady seguiría en `false` sin
+        // esto, y `refine()` gatea en `isReady`). También asegura el límite
+        // de cache de MLX si `prepare()` nunca llegó a aplicarlo.
+        isReady = true
+        await applyGPUCacheLimitIfNeeded()
         KikiLog.log("kiki refine: modelo conmutado a \(model)")
     }
 

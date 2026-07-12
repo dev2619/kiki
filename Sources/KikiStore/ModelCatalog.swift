@@ -49,13 +49,14 @@ public struct ModelOption: Equatable, Identifiable {
 /// the repo contains a distinct multilingual `openai_whisper-small` folder (no size
 /// suffix) alongside `openai_whisper-small.en` and `openai_whisper-small.en_217MB`
 /// (English-only variants, correctly excluded here) and `openai_whisper-small_216MB`
-/// (an alternate, size-suffixed multilingual folder name). This catalog intentionally
-/// uses the bare `small` id to match the existing `large-v3_turbo`/`large-v3_turbo_954MB`
-/// naming convention already used by `large-v3_turbo_954MB` (base) and `large-v3_turbo`.
+/// (an alternate, size-suffixed multilingual folder name). This catalog uses the
+/// `small_216MB` id (glob `*small_216MB/*`) rather than the bare `small` id: it is
+/// even MORE specific than the bare form (no ambiguity with `.en`/`.en_217MB`
+/// variants) and matches the "~216 MB" size label shown to the user.
 public enum ModelCatalog {
     public static let sttOptions: [ModelOption] = [
         ModelOption(
-            id: "small",
+            id: "small_216MB",
             displayName: "Rápido (small)",
             sizeLabel: "~216 MB",
             detail: "Descarga rápida y bajo uso de memoria; menor precisión en audio ruidoso.",
@@ -71,7 +72,7 @@ public enum ModelCatalog {
         ModelOption(
             id: "large-v3_turbo",
             displayName: "Máxima precisión",
-            sizeLabel: "~1.5 GB",
+            sizeLabel: "~3 GB",
             detail: "Mayor precisión; la primera ejecución compila para ANE y puede tardar varios minutos.",
             isBase: false
         ),
