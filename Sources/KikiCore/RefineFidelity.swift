@@ -16,9 +16,18 @@ import Foundation
 public enum RefineFidelity {
     /// Fracción máxima de palabras del texto refinado que pueden estar
     /// ausentes del original (más el diccionario del usuario) antes de
-    /// considerarlo infiel. 0.5 = si más de la mitad del refinado es
-    /// vocabulario nuevo, es paráfrasis/alucinación, no limpieza.
-    public static let maxNoveltyRatio = 0.5
+    /// considerarlo infiel.
+    ///
+    /// Endurecido a 0.15 (2026-07-17, feedback de campo "el dictado lo tomó
+    /// bien, tal cual lo dije, pero la transcripción se cambió"): una limpieza
+    /// legítima (mayúsculas, puntuación, acentos, quitar muletillas) produce
+    /// CERO vocabulario nuevo — los acentos y mayúsculas se pliegan en
+    /// `tokenize`, y borrar no agrega. Por tanto, casi cualquier palabra nueva
+    /// es un cambio no deseado: el refinador reescribió lo que Whisper ya había
+    /// acertado. Con el umbral bajo, ese refinado se RECHAZA y se inserta el
+    /// texto crudo y fiel de Whisper. El 0.15 (no 0) deja un margen mínimo para
+    /// casos legítimos raros (p. ej. separar dos palabras que Whisper pegó).
+    public static let maxNoveltyRatio = 0.15
 
     /// `true` si `refined` es una limpieza fiel de `original`: no introduce
     /// demasiado vocabulario nuevo. `allowedExtraTerms` son términos del

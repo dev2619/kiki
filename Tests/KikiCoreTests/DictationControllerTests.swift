@@ -590,7 +590,10 @@ final class DictationControllerTests: XCTestCase {
 
     func test_historyRecordsRawAndFinal() async {
         let refiner = MockRefiner()
-        refiner.textToReturn = "refined text"
+        // Refinado FIEL (solo mayúsculas/puntuación, mismas palabras) para que
+        // pase la guardia de fidelidad endurecida (2026-07-17) y siga probando
+        // que el texto refinado fluye a Historial distinto del crudo.
+        refiner.textToReturn = "Raw text."
         let context = MockContext()
         context.profileToReturn = .code
         let history = MockHistory()
@@ -608,7 +611,7 @@ final class DictationControllerTests: XCTestCase {
         XCTAssertEqual(history.recordings.count, 1)
         let record = history.recordings[0]
         XCTAssertEqual(record.rawText, "raw text")
-        XCTAssertEqual(record.finalText, "refined text")
+        XCTAssertEqual(record.finalText, "Raw text.")
         XCTAssertEqual(record.profile, .code)
         XCTAssertEqual(record.audioSeconds, 1.0) // 16_000 samples / 16_000 sampleRate
     }
@@ -1103,7 +1106,9 @@ final class DictationControllerTests: XCTestCase {
     func test_liveReleaseRefinesFinalWhenRefineEnabled() async {
         let (coordinator, _) = makeLiveCoordinator(scriptedTexts: ["final live text"])
         let refiner = MockRefiner()
-        refiner.textToReturn = "final live text refined"
+        // Refinado FIEL (mismas palabras, solo mayúsculas/puntuación) para pasar
+        // la guardia de fidelidad endurecida.
+        refiner.textToReturn = "Final live text."
         let context = MockContext()
         controller = DictationController(
             recorder: recorder, transcriber: transcriber, inserter: inserter,
@@ -1116,7 +1121,7 @@ final class DictationControllerTests: XCTestCase {
         await controller.hotkeyReleased()
 
         XCTAssertEqual(refiner.receivedTexts, ["final live text"], "the streaming final IS refined now")
-        XCTAssertEqual(inserter.inserted, ["final live text refined"])
+        XCTAssertEqual(inserter.inserted, ["Final live text."])
     }
 
     func test_liveReleaseTranslatesFinalWhenTranslateEnabled() async {

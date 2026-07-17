@@ -161,6 +161,7 @@ public final class DictationController {
             // buffer del recorder, en cambio, ya tiene TODO el audio grabado
             // en el momento de `stop()`.
             let final = await liveSession.finish(fullAudio: samples)
+            KikiLog.log("kiki live: crudo final (\(final.count) chars): \"\(final)\"")
             let audioSeconds = Double(samples.count) / sampleRate
             // Calidad "sobresaliente" (2026-07-17): el pase final del streaming
             // SÍ pasa por el refinador (puntuación, mayúsculas, acentos,
