@@ -100,7 +100,7 @@ public final class LiveTranscriptionCoordinator {
         self.minNewAudioSamples = Int(minNewAudioSeconds * sampleRate)
         self.maxLivePassSamples = maxLivePassSeconds > 0 ? Int(maxLivePassSeconds * sampleRate) : 0
         self.sampleRate = sampleRate
-        self.detectMinSamples = Int(1.5 * sampleRate)
+        self.detectMinSamples = Int(2.0 * sampleRate)
         self.now = now
     }
 
@@ -129,11 +129,16 @@ public final class LiveTranscriptionCoordinator {
         guard capturedGeneration == generation else { return "" }
         isFinished = true
         let samples = fullAudio ?? buffer
-        KikiLog.log("kiki live: pase final (\(samples.count) muestras, idioma \(lockedLanguage ?? "auto"))")
+        KikiLog.log("kiki live: pase final (\(samples.count) muestras, idioma \(forcedLanguage ?? "auto→buffer completo"))")
         do {
-            // Idioma bloqueado → omite el pase de detección extra (más rápido) y
-            // garantiza que el final use el MISMO idioma que se vio en vivo.
-            let text = try await transcriber.transcribe(samples, knownLanguage: lockedLanguage)
+            // Idioma del pase final/insertado: si el usuario lo FIJÓ, se usa
+            // (rápido, sin detección). En Auto (`forcedLanguage == nil`) se pasa
+            // `nil` para que Whisper DETECTE sobre el buffer COMPLETO — fiable —
+            // en vez de reusar el bloqueo temprano del streaming (detección
+            // sobre ~1.5s que fallaba es↔en y el refinador terminaba traduciendo,
+            // bug de campo 2026-07-17). El preview en vivo sigue con el bloqueo
+            // tentativo; lo que se INSERTA usa esta detección fiable.
+            let text = try await transcriber.transcribe(samples, knownLanguage: forcedLanguage)
             guard capturedGeneration == generation else { return "" }
             if !text.isEmpty { lastNonEmptyPartial = text }
             return text

@@ -166,9 +166,19 @@ public final class DictationController {
             // SÍ pasa por el refinador (puntuación, mayúsculas, acentos,
             // comillas) — como el modo batch — para igualar a los tops de
             // mercado. El preview en vivo sigue crudo/rápido; lo que se INSERTA
-            // queda pulido. Idioma: el bloqueado por la sesión de streaming (o
-            // el forzado por el usuario), para refinar en el idioma correcto.
-            let language = liveSession.detectedLanguage ?? forcedLanguage() ?? "es"
+            // queda pulido. Idioma: si el usuario lo FIJÓ se usa; en Auto se lee
+            // del `languageProvider`, que `finish` acaba de fijar detectando
+            // sobre el buffer COMPLETO (fiable) — NO el bloqueo temprano del
+            // streaming, que sobre ~1.5s fallaba es↔en y el refinador terminaba
+            // traduciendo el dictado (bug de campo 2026-07-17). Mismo camino que
+            // el modo batch (`transcribeAndProcess`).
+            let forced = forcedLanguage()
+            let language: String
+            if let forced {
+                language = forced
+            } else {
+                language = await languageProvider?.detectedLanguage() ?? "es"
+            }
             await processTranscriptContent(final, audioSeconds: audioSeconds, language: language, bypassEnhancement: false)
             // Limpia la burbuja DESPUÉS de insertar — ver comentario arriba.
             delegate?.dictationLivePartialDidChange(nil)
