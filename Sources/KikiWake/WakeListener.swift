@@ -335,7 +335,15 @@ public final class WakeListener: @unchecked Sendable {
         self.armedConfig = SegmenterConfig(
             speechRMSThreshold: speechRMSThreshold,
             endSilence: 1.5,
-            maxSegmentDuration: 30,
+            // 180s (antes 30): un dictado manos-libres continuo >30s superaba el
+            // máximo y el segmento se DESCARTABA entero — se perdía todo el
+            // dictado y solo la cola posterior (silencio + alucinación) se
+            // insertaba ("¡Gracias!", bug de campo 2026-07-17). Como cualquier
+            // pausa de ≥`endSilence` (1.5s) ya cierra el segmento con normalidad,
+            // el máximo solo dispara con 180s de habla CONTINUA sin pausa —
+            // rarísimo. Sube el techo para no perder dictados largos; el
+            // `stopAndFlush` sigue como escape manual.
+            maxSegmentDuration: 180,
             adaptiveThreshold: true)
         self.segmenter = SpeechSegmenter(config: self.listeningConfig)
     }
