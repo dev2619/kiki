@@ -19,6 +19,7 @@ final class HUDController {
     /// el tamaño compacto (sin salto entre ellos), y solo al revelar el
     /// RESULTADO crece a `resultSize` un instante.
     private static let recordingSize = NSSize(width: 220, height: 50)  // onda reactiva a la voz
+    private static let liveSize = NSSize(width: 440, height: 66)       // texto en vivo (Paso 2): ~2 líneas, scroll interno pasado eso
     private static let processingSize = NSSize(width: 220, height: 50) // contorno multicolor girando (mismo ancho → sin salto rec→proc)
     private static let armedSize = NSSize(width: 200, height: 50)      // "Te escucho…"
     // Resultado: ancho fijo, ALTO dinámico según el texto (crece hasta caber;
@@ -143,13 +144,19 @@ final class HUDController {
         }
     }
 
-    /// Recibe el parcial en vivo. Desde el rediseño "solo onda" el HUD YA NO
-    /// muestra este texto (durante el dictado se ve una onda), así que esto
-    /// solo actualiza el modelo por compatibilidad — el panel lo gobierna
-    /// `show(state:)`. Se mantiene el método porque `AppDelegate` lo llama
-    /// desde `dictationLivePartialDidChange` (incluido el `nil` de limpieza).
+    /// Recibe el parcial en vivo (Paso 2: preview de Apple Speech en el flujo
+    /// por hotkey). El HUD lo muestra durante `.recording`. Cuando el texto
+    /// aparece o desaparece, la píldora cambia de tamaño (compacta ⇄ ancha con
+    /// texto) — re-aplicamos layout SOLO en ese cruce, no en cada parcial (el
+    /// texto crece dentro del mismo tamaño y hace scroll interno), para no
+    /// redimensionar el panel palabra a palabra.
     func updateLiveText(_ text: String?) {
+        let hadText = !(model.liveText ?? "").isEmpty
         model.liveText = text
+        let hasText = !(text ?? "").isEmpty
+        if model.state == .recording && hadText != hasText {
+            applyLayout(animated: true)
+        }
     }
 
     /// Pill transitorio con texto libre (p. ej. confirmación del atajo
@@ -213,7 +220,10 @@ final class HUDController {
     private func targetSize() -> NSSize {
         if model.transientText != nil { return pendingResultSize }
         switch model.state {
-        case .recording: return Self.recordingSize
+        case .recording:
+            // Con texto en vivo la nube crece para mostrarlo; sin él, píldora
+            // compacta de onda.
+            return (model.liveText?.isEmpty == false) ? Self.liveSize : Self.recordingSize
         case .processing: return Self.processingSize
         case .idle: return Self.armedSize   // solo visible si `armed`
         }

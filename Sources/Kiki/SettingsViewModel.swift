@@ -245,6 +245,28 @@ final class SettingsViewModel: ObservableObject {
             : false
     }
 
+    /// Preview en vivo con Apple Speech (Paso 2, 2026-07-17): muestra el texto
+    /// en la nube MIENTRAS hablas (on-device, palabra a palabra). Es display-
+    /// only — el pase final e insertado lo hace Whisper en batch. Sustituye al
+    /// streaming de Whisper (`liveTranscription`, que quedó off por el bug de
+    /// idioma) como el mecanismo de "ver lo que digo". Default ON.
+    @Published var appleLivePreviewEnabled: Bool {
+        didSet {
+            UserDefaults.standard.set(appleLivePreviewEnabled, forKey: Self.appleLivePreviewDefaultsKey)
+        }
+    }
+
+    nonisolated static let appleLivePreviewDefaultsKey = "kiki.appleLivePreview"
+
+    /// Lectura ausente→`true` de `kiki.appleLivePreview`. `nonisolated` para
+    /// leerla desde `AppDelegate` sin depender de la instancia ni de MainActor.
+    nonisolated static func effectiveAppleLivePreview() -> Bool {
+        let defaults = UserDefaults.standard
+        return defaults.object(forKey: appleLivePreviewDefaultsKey) != nil
+            ? defaults.bool(forKey: appleLivePreviewDefaultsKey)
+            : true
+    }
+
     /// Salida del transcript — dos toggles independientes (2026-07-16),
     /// ambos default ON, leídos por `PasteInserter` en cada insert (aplican
     /// en caliente, sin notificaciones):
@@ -428,6 +450,7 @@ final class SettingsViewModel: ObservableObject {
             ? defaults.bool(forKey: Self.alwaysListeningDefaultsKey)
             : true
         self.liveTranscriptionEnabled = Self.effectiveLiveTranscription()
+        self.appleLivePreviewEnabled = Self.effectiveAppleLivePreview()
         // Migrar el toggle viejo ANTES de leer las keys nuevas (ver
         // `migrateRestoreClipboardIfNeeded`).
         Self.migrateRestoreClipboardIfNeeded()

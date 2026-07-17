@@ -24,5 +24,7 @@
 	<true/>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>kiki usa el micrófono para transcribir tu dictado. Todo el procesamiento es 100% local: tu voz nunca sale de este Mac.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>kiki usa el reconocimiento de voz de Apple, en el dispositivo, solo para mostrarte el texto en vivo mientras hablas. El pase final lo hace Whisper localmente; tu voz nunca sale de este Mac.</string>
 </dict>
 </plist>

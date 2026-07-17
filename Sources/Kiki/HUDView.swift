@@ -67,7 +67,14 @@ struct HUDView: View {
             resultRow(transientText)
                 .transition(.opacity.combined(with: .scale(scale: 0.97)))
         } else if model.state == .recording {
-            waveform.transition(.opacity.combined(with: .scale(scale: 0.97)))
+            Group {
+                if let live = model.liveText, !live.isEmpty {
+                    liveRow(live)          // Paso 2: texto en vivo (Apple Speech)
+                } else {
+                    waveform               // aún sin palabras → onda reactiva
+                }
+            }
+            .transition(.opacity.combined(with: .scale(scale: 0.97)))
         } else if model.state == .processing {
             // el contorno + interior hacen todo; sin contenido central
             Color.clear.frame(height: 30).transition(.opacity)
@@ -103,6 +110,47 @@ struct HUDView: View {
         let level = Double(min(max(model.level, 0) * 9, 1))
         let life = 0.82 + 0.18 * sin(t * 9 + Double(i))
         return 5 + CGFloat(level * 28 * shape * life)
+    }
+
+    // MARK: - Texto en vivo (Paso 2, Apple Speech)
+
+    /// Punto que respira = "grabando/escuchando".
+    private var pulseDot: some View {
+        TimelineView(.animation) { timeline in
+            let p = sin(timeline.date.timeIntervalSinceReferenceDate * 4) * 0.5 + 0.5
+            Circle()
+                .fill(pink)
+                .frame(width: 8, height: 8)
+                .opacity(0.45 + 0.55 * p)
+                .shadow(color: pink.opacity(0.7), radius: 4)
+        }
+        .frame(width: 8, height: 8)
+        .padding(.top, 4)
+    }
+
+    /// Muestra el parcial en vivo mientras hablas, con auto-scroll al final para
+    /// que las últimas palabras siempre estén a la vista. La nube crece hasta un
+    /// máximo (ver `HUDController`) y, pasado eso, hace scroll interno.
+    private func liveRow(_ text: String) -> some View {
+        ScrollViewReader { proxy in
+            ScrollView(.vertical, showsIndicators: false) {
+                HStack(alignment: .top, spacing: 10) {
+                    pulseDot
+                    Text(text)
+                        .font(.system(size: 14, weight: .medium))
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .padding(.bottom, 1)
+                .id("liveBottom")
+            }
+            .frame(maxHeight: .infinity)
+            .onChange(of: text) {
+                withAnimation(.easeOut(duration: 0.15)) {
+                    proxy.scrollTo("liveBottom", anchor: .bottom)
+                }
+            }
+        }
     }
 
     // MARK: - Resultado

@@ -188,9 +188,9 @@ private struct GeneralSectionView: View {
             }
 
             Section {
-                Toggle("Transcripción en vivo", isOn: $viewModel.liveTranscriptionEnabled)
+                Toggle("Ver texto en vivo mientras hablas", isOn: $viewModel.appleLivePreviewEnabled)
             } footer: {
-                Text("Con esto activado, ves el texto en una burbuja mientras dictas y se inserta al instante al terminar — sin refinado ni traducción por IA en ese dictado. Desactívalo para volver al modo con IA (refinado/traducción), que procesa al final.")
+                Text("Activado (por defecto), la nube muestra lo que vas diciendo en tiempo real con el reconocimiento de voz de Apple, 100% en tu Mac. El texto final que se inserta lo produce Whisper (más preciso), así que el refinado, la traducción y el idioma siguen funcionando igual. Desactívalo para ver solo la onda de sonido mientras dictas.")
             }
 
             Section {
