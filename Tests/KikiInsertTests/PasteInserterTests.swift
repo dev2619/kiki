@@ -12,80 +12,109 @@ final class PasteInserterTests: XCTestCase {
     }
 
     private func makeInserter(
-        restores: Bool,
+        copy: Bool,
+        paste: Bool,
         sendPaste: @escaping () throws -> Void = {}
     ) -> PasteInserter {
         PasteInserter(
             pasteboard: pasteboard,
             restoreDelay: 0.05,
-            restoresClipboard: { restores },
+            copyEnabled: { copy },
+            autoPasteEnabled: { paste },
             sendPaste: sendPaste)
     }
 
-    func test_defaultKeepsTranscriptionInClipboard() throws {
-        ClipboardManager.setString("contenido anterior", on: pasteboard)
-        let inserter = makeInserter(restores: false)
-
-        try inserter.insert("texto dictado")
-
-        // Tras el delay de restore, la transcripción SIGUE en el clipboard.
+    private func waitABit() {
         let expectation = expectation(description: "post-delay")
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { expectation.fulfill() }
         wait(for: [expectation], timeout: 1)
+    }
+
+    // Combinación por defecto: pegar + copiar → el texto queda en el clipboard.
+    func test_pasteAndCopy_keepsTranscriptionInClipboard() throws {
+        ClipboardManager.setString("contenido anterior", on: pasteboard)
+        var pasteCount = 0
+        let inserter = makeInserter(copy: true, paste: true, sendPaste: { pasteCount += 1 })
+
+        try inserter.insert("texto dictado")
+
+        XCTAssertEqual(pasteCount, 1, "debe pegar con ⌘V")
+        waitABit()
         XCTAssertEqual(pasteboard.string(forType: .string), "texto dictado")
     }
 
-    func test_restoreToggleRestoresPreviousClipboard() throws {
+    // Pegar sin dejar rastro (copy off): pega y restaura el clipboard previo.
+    func test_pasteWithoutCopy_restoresPreviousClipboard() throws {
         ClipboardManager.setString("contenido anterior", on: pasteboard)
-        let inserter = makeInserter(restores: true)
+        let inserter = makeInserter(copy: false, paste: true)
 
         try inserter.insert("texto dictado")
-        // Inmediatamente después del paste, la transcripción está en el clipboard.
+        // Justo tras el paste, la transcripción está en el clipboard (para ⌘V).
         XCTAssertEqual(pasteboard.string(forType: .string), "texto dictado")
 
-        let expectation = expectation(description: "post-delay")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { expectation.fulfill() }
-        wait(for: [expectation], timeout: 1)
+        waitABit()
         XCTAssertEqual(pasteboard.string(forType: .string), "contenido anterior")
     }
 
-    func test_toggleIsReadPerInsertNotAtInit() throws {
-        // El closure se evalúa en cada insert: cambiar el setting aplica en caliente.
-        var restores = false
+    // Solo copiar (paste off): deja el texto en el clipboard, sin ⌘V.
+    func test_copyOnly_setsClipboardWithoutPasting() throws {
+        ClipboardManager.setString("contenido anterior", on: pasteboard)
+        var pasteCount = 0
+        let inserter = makeInserter(copy: true, paste: false, sendPaste: { pasteCount += 1 })
+
+        try inserter.insert("texto dictado")
+
+        XCTAssertEqual(pasteCount, 0, "no debe sintetizar ⌘V")
+        waitABit()
+        XCTAssertEqual(pasteboard.string(forType: .string), "texto dictado")
+    }
+
+    // Ninguno: no toca clipboard ni cursor.
+    func test_neither_leavesClipboardUntouched() throws {
+        ClipboardManager.setString("contenido anterior", on: pasteboard)
+        var pasteCount = 0
+        let inserter = makeInserter(copy: false, paste: false, sendPaste: { pasteCount += 1 })
+
+        try inserter.insert("texto dictado")
+
+        XCTAssertEqual(pasteCount, 0)
+        waitABit()
+        XCTAssertEqual(pasteboard.string(forType: .string), "contenido anterior")
+    }
+
+    // Los toggles se leen en CADA insert (aplican en caliente).
+    func test_togglesReadPerInsert() throws {
+        var copy = true
         let inserter = PasteInserter(
             pasteboard: pasteboard,
             restoreDelay: 0.05,
-            restoresClipboard: { restores },
+            copyEnabled: { copy },
+            autoPasteEnabled: { true },
             sendPaste: {})
 
         ClipboardManager.setString("previo-1", on: pasteboard)
         try inserter.insert("dictado-1")
-        let first = expectation(description: "first")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { first.fulfill() }
-        wait(for: [first], timeout: 1)
-        XCTAssertEqual(pasteboard.string(forType: .string), "dictado-1")
+        waitABit()
+        XCTAssertEqual(pasteboard.string(forType: .string), "dictado-1", "copy on → queda")
 
-        restores = true
+        copy = false
         ClipboardManager.setString("previo-2", on: pasteboard)
         try inserter.insert("dictado-2")
-        let second = expectation(description: "second")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { second.fulfill() }
-        wait(for: [second], timeout: 1)
-        XCTAssertEqual(pasteboard.string(forType: .string), "previo-2")
+        waitABit()
+        XCTAssertEqual(pasteboard.string(forType: .string), "previo-2", "copy off → restaura")
     }
 
-    func test_pasteFailureLeavesTextInClipboardEvenWithRestoreOn() throws {
+    // Falla de paste con copy off: el texto queda en el clipboard (spec §7) y
+    // NO se restaura (para no perderlo).
+    func test_pasteFailureLeavesTextInClipboard() throws {
         ClipboardManager.setString("contenido anterior", on: pasteboard)
-        let inserter = makeInserter(restores: true, sendPaste: {
+        let inserter = makeInserter(copy: false, paste: true, sendPaste: {
             throw DictationError.insertionFailed("simulado")
         })
 
         XCTAssertThrowsError(try inserter.insert("texto dictado"))
 
-        // Falla de paste: el texto queda en el clipboard (spec §7) y NO se restaura.
-        let expectation = expectation(description: "post-delay")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { expectation.fulfill() }
-        wait(for: [expectation], timeout: 1)
+        waitABit()
         XCTAssertEqual(pasteboard.string(forType: .string), "texto dictado")
     }
 }

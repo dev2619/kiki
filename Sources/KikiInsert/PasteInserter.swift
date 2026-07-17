@@ -1,42 +1,75 @@
 import AppKit
 import KikiCore
 
-/// Inserta texto en la app activa: pone el texto en el clipboard y
-/// sintetiza Cmd+V. Por defecto la transcripción QUEDA en el clipboard
-/// (F2, spec 2026-07-11) lista para pegar en otro lado; restaurar el
-/// clipboard anterior es opt-in vía `restoresClipboard` (toggle en Ajustes,
-/// leído en cada insert para que el cambio aplique en caliente).
+/// Inserta el texto dictado según dos toggles independientes, ambos leídos
+/// en CADA `insert` (aplican en caliente):
+///
+/// - `copyEnabled` ("Copiar al portapapeles"): si el texto QUEDA en el
+///   portapapeles tras dictar.
+/// - `autoPasteEnabled` ("Pegar automáticamente"): si se sintetiza ⌘V para
+///   insertarlo en la app activa.
+///
+/// Las 4 combinaciones (2026-07-16, reemplaza al viejo `restoresClipboard`):
+/// - pegar + copiar (default): ⌘V y el texto queda en el portapapeles.
+/// - solo copiar: queda en el portapapeles, sin ⌘V (el usuario pega a mano).
+/// - pegar sin dejar rastro: se pega con ⌘V y se RESTAURA el portapapeles
+///   anterior (el texto no queda). Es el único caso que toma snapshot.
+/// - ninguno: no toca portapapeles ni cursor (el transcript igual va a
+///   Historial en la capa superior).
 public final class PasteInserter: TextInserting {
     private let pasteboard: NSPasteboard
     private let restoreDelay: TimeInterval
-    private let restoresClipboard: () -> Bool
+    private let copyEnabled: () -> Bool
+    private let autoPasteEnabled: () -> Bool
     private let sendPaste: () throws -> Void
 
     /// - Parameters:
-    ///   - restoresClipboard: se evalúa en cada `insert`; `true` restaura el
-    ///     clipboard anterior tras `restoreDelay`. Default `false` (keep).
+    ///   - copyEnabled: se evalúa en cada `insert`; `true` deja el texto en el
+    ///     portapapeles. Default `true`.
+    ///   - autoPasteEnabled: se evalúa en cada `insert`; `true` sintetiza ⌘V.
+    ///     Default `true`.
     ///   - sendPaste: seam de test para el Cmd+V sintético; `nil` = real.
     public init(
         pasteboard: NSPasteboard = .general,
         restoreDelay: TimeInterval = 0.4,
-        restoresClipboard: @escaping () -> Bool = { false },
+        copyEnabled: @escaping () -> Bool = { true },
+        autoPasteEnabled: @escaping () -> Bool = { true },
         sendPaste: (() throws -> Void)? = nil
     ) {
         self.pasteboard = pasteboard
         self.restoreDelay = restoreDelay
-        self.restoresClipboard = restoresClipboard
+        self.copyEnabled = copyEnabled
+        self.autoPasteEnabled = autoPasteEnabled
         self.sendPaste = sendPaste ?? PasteInserter.synthesizeCmdV
     }
 
     public func insert(_ text: String) throws {
-        let snapshot = ClipboardManager.snapshot(of: pasteboard)
+        let keep = copyEnabled()
+        let paste = autoPasteEnabled()
+
+        // Ni copiar ni pegar: nada que hacer con portapapeles/cursor (el
+        // transcript igual queda en Historial en la capa superior).
+        guard keep || paste else { return }
+
+        guard paste else {
+            // Solo copiar: dejar el texto en el portapapeles, sin ⌘V.
+            ClipboardManager.setString(text, on: pasteboard)
+            return
+        }
+
+        // Pegar: hace falta el texto en el portapapeles para el ⌘V. El
+        // snapshot SOLO se toma si hay que restaurar (keep == false) — evita
+        // la copia profunda del portapapeles (imágenes/archivos) en el caso
+        // común (perezoso, 1d).
+        let snapshot = keep ? nil : ClipboardManager.snapshot(of: pasteboard)
         ClipboardManager.setString(text, on: pasteboard)
-        // Si el paste falla, el texto queda en el clipboard (spec §7) para
-        // pegarlo a mano — por eso no hay restore en el camino de error.
+        // Si el paste falla, el texto queda en el portapapeles (spec §7) para
+        // pegarlo a mano — el throw evita el restore de abajo, así no se pierde.
         try sendPaste()
-        guard restoresClipboard() else { return }
-        DispatchQueue.main.asyncAfter(deadline: .now() + restoreDelay) { [pasteboard] in
-            ClipboardManager.restore(snapshot, to: pasteboard)
+        if let snapshot {
+            DispatchQueue.main.asyncAfter(deadline: .now() + restoreDelay) { [pasteboard] in
+                ClipboardManager.restore(snapshot, to: pasteboard)
+            }
         }
     }
 
