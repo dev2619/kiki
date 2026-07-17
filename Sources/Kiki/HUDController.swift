@@ -8,12 +8,23 @@ import KikiCore
 final class HUDController {
     /// Duración fija del pill transitorio (`showTransient`) antes de
     /// auto-restaurar la vista normal — ver doc ahí.
-    private static let transientDuration: UInt64 = 1_200_000_000 // 1.2s en ns
-    /// Tamaño original del panel — pill de una línea.
-    private static let pillSize = NSSize(width: 220, height: 48)
-    /// Tamaño del panel cuando la burbuja de texto en vivo está activa (ver
-    /// `HUDView.showBubble`) — fijo, más grande para ~3 líneas de texto.
-    private static let bubbleSize = NSSize(width: 440, height: 110)
+    private static let transientDuration: UInt64 = 2_200_000_000 // 2.2s en ns
+    /// Gracia tras salir el cursor de la nube (hover-para-persistir): se oculta
+    /// poco después de que el cursor la abandona, no de golpe.
+    private static let hoverExitGrace: UInt64 = 600_000_000 // 0.6s en ns
+    /// Tamaños por estado (compactos — la píldora NO es una barra gigante
+    /// vacía). El cambio entre estados es una transición ANIMADA suave (ver
+    /// `applyLayout`), no un salto por-palabra: grabando/procesando comparten
+    /// el tamaño compacto (sin salto entre ellos), y solo al revelar el
+    /// RESULTADO crece a `resultSize` un instante.
+    private static let recordingSize = NSSize(width: 220, height: 50)  // onda reactiva a la voz
+    private static let processingSize = NSSize(width: 220, height: 50) // contorno multicolor girando (mismo ancho → sin salto rec→proc)
+    private static let armedSize = NSSize(width: 200, height: 50)      // "Te escucho…"
+    // Resultado: ancho fijo, ALTO dinámico según el texto (crece hasta caber;
+    // más allá del máximo hay scroll interno en `HUDView.resultRow`).
+    private static let resultWidth: CGFloat = 440
+    private static let minResultHeight: CGFloat = 58
+    private static let maxResultHeight: CGFloat = 220
 
     private let panel: NSPanel
     private let model = HUDModel()
@@ -22,43 +33,59 @@ final class HUDController {
     /// timer viejo se descarta sin restaurar nada — solo el más reciente
     /// controla cuándo se auto-oculta.
     private var transientGeneration = 0
+    /// Tamaño calculado para el resultado transitorio en curso (alto dinámico).
+    private var pendingResultSize = NSSize(width: 440, height: 58)
 
     init() {
         panel = NSPanel(
-            contentRect: NSRect(origin: .zero, size: Self.pillSize),
+            contentRect: NSRect(origin: .zero, size: Self.recordingSize),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false)
         panel.level = .statusBar
         panel.isOpaque = false
         panel.backgroundColor = .clear
-        panel.hasShadow = false
+        // Sombra flotante del panel (sigue la forma redondeada del vidrio
+        // SwiftUI). El look de vidrio premium (blur + degradado + borde
+        // iluminado + halo) vive en `HUDView.glass` — puerto del mockup
+        // aprobado; ya no se usa NSVisualEffectView (a nivel statusBar el
+        // blur behind-window renderizaba gris plano).
+        panel.hasShadow = true
         panel.ignoresMouseEvents = true
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         panel.contentView = NSHostingView(rootView: HUDView(model: model))
+        // Hover-para-persistir: la nube de resultado avisa cuándo el cursor
+        // entra/sale para pausar o reanudar el auto-ocultado.
+        model.onHoverChange = { [weak self] hovering in
+            self?.handleResultHover(hovering)
+        }
     }
 
     func show(state: DictationState) {
         model.state = state
+        // Fuera del resultado transitorio, la nube vuelve a ignorar el ratón
+        // (no roba clics a la app donde el usuario dicta).
+        if model.transientText == nil {
+            panel.ignoresMouseEvents = true
+        }
         // Defensa: un caller que llegue a idle sin updateLiveText(nil) no debe
         // filtrar el texto de la sesión anterior a la próxima burbuja.
         if case .idle = state {
             model.liveText = nil
         }
-        resizeForCurrentContent()
         switch state {
         case .idle:
             // Sesión continua de manos-libres: si sigue armada (pill "👂 Te
             // escucho…" entre utterances), NO ocultar el panel al volver a
             // idle — solo se oculta cuando de verdad no hay nada que mostrar.
             if model.armed {
-                positionAtBottomCenter()
+                applyLayout(animated: true)
                 panel.orderFrontRegardless()
             } else {
                 panel.orderOut(nil)
             }
         case .recording, .processing:
-            positionAtBottomCenter()
+            applyLayout(animated: true)
             panel.orderFrontRegardless()
         }
     }
@@ -77,32 +104,21 @@ final class HUDController {
 
     func showArmed(_ on: Bool) {
         model.armed = on
-        resizeForCurrentContent()
         if on {
-            positionAtBottomCenter()
+            applyLayout(animated: true)
             panel.orderFrontRegardless()
         } else if model.state == .idle {
             panel.orderOut(nil)
         }
     }
 
-    /// Fija la transcripción parcial en vivo del dictado actual. Si no es
-    /// nil, asegura que el panel esté visible (el estado `.recording` ya lo
-    /// muestra normalmente; esto cubre además el pase final breve de
-    /// `.processing`) y redimensiona el panel a la burbuja — ver
-    /// `resizeForCurrentContent`/`HUDView.showBubble`.
+    /// Recibe el parcial en vivo. Desde el rediseño "solo onda" el HUD YA NO
+    /// muestra este texto (durante el dictado se ve una onda), así que esto
+    /// solo actualiza el modelo por compatibilidad — el panel lo gobierna
+    /// `show(state:)`. Se mantiene el método porque `AppDelegate` lo llama
+    /// desde `dictationLivePartialDidChange` (incluido el `nil` de limpieza).
     func updateLiveText(_ text: String?) {
         model.liveText = text
-        resizeForCurrentContent()
-        // Reposicionar SIEMPRE: setContentSize ancla arriba-izquierda; encoger
-        // sin reposicionar deja el pill corrido (finding review F1 T4).
-        positionAtBottomCenter()
-        // Solo mostrar si el texto es no-nil o el estado lo requiere.
-        let shouldShow = text != nil || model.state == .recording
-            || model.state == .processing || model.armed
-        if shouldShow {
-            panel.orderFrontRegardless()
-        }
     }
 
     /// Pill transitorio con texto libre (p. ej. confirmación del atajo
@@ -111,45 +127,77 @@ final class HUDController {
     /// "respeta el estado armado" sin duplicar esa lógica aquí.
     func showTransient(_ text: String) {
         model.transientText = text
-        resizeForCurrentContent()
-        positionAtBottomCenter()
+        pendingResultSize = Self.computeResultSize(for: text)
+        // Habilitar eventos de ratón para detectar hover-para-persistir. Fuera
+        // del resultado se restaura a `true` en `show(state:)`.
+        panel.ignoresMouseEvents = false
+        applyLayout(animated: true)
         panel.orderFrontRegardless()
+        scheduleTransientDismiss(delay: Self.transientDuration)
+    }
+
+    /// Programa el auto-ocultado del pill transitorio con control de generación:
+    /// un timer nuevo invalida los previos (toggles rápidos, hover, salida).
+    private func scheduleTransientDismiss(delay: UInt64) {
         transientGeneration += 1
         let generation = transientGeneration
         Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: Self.transientDuration)
+            try? await Task.sleep(nanoseconds: delay)
             guard let self, generation == self.transientGeneration else { return }
             self.model.transientText = nil
+            self.panel.ignoresMouseEvents = true
             self.show(state: self.model.state)
         }
     }
 
-    /// Misma condición que `HUDView.showBubble` — duplicada aquí porque el
-    /// controller no tiene acceso directo al cuerpo de la vista y necesita
-    /// decidir el tamaño del panel antes de dibujarla.
-    private var shouldShowBubble: Bool {
-        model.transientText == nil && model.liveText != nil
-            && (model.state == .recording || model.state == .processing)
+    /// Hover-para-persistir: mientras el cursor está DENTRO de la nube de
+    /// resultado se cancela el auto-ocultado; al salir se oculta tras una breve
+    /// gracia. Si el usuario nunca la toca, rige el timer normal de 2.2 s.
+    private func handleResultHover(_ hovering: Bool) {
+        guard model.transientText != nil else { return }
+        if hovering {
+            // invalida cualquier timer pendiente → la nube permanece
+            transientGeneration += 1
+        } else {
+            scheduleTransientDismiss(delay: Self.hoverExitGrace)
+        }
     }
 
-    /// Ajusta el tamaño del panel al contenido actual: `bubbleSize` para la
-    /// burbuja de texto en vivo, `pillSize` (tamaño original) en cualquier
-    /// otro caso. No reposiciona — los llamadores ya invocan
-    /// `positionAtBottomCenter()` después para recentrar bottom-center con
-    /// el nuevo tamaño.
-    private func resizeForCurrentContent() {
-        let target = shouldShowBubble ? Self.bubbleSize : Self.pillSize
-        guard panel.frame.size != target else { return }
-        panel.setContentSize(target)
+    /// Mide el alto necesario para el texto del resultado (ancho fijo), acotado
+    /// entre el mínimo y el máximo; más allá del máximo, hay scroll interno.
+    private static func computeResultSize(for text: String) -> NSSize {
+        let font = NSFont.systemFont(ofSize: 14, weight: .medium)
+        let horizontalPadding: CGFloat = 22 * 2   // .padding(.horizontal, 22)
+        let iconColumn: CGFloat = 17 + 11         // ✓ + spacing del HStack
+        let textWidth = resultWidth - horizontalPadding - iconColumn
+        let bounding = (text as NSString).boundingRect(
+            with: NSSize(width: textWidth, height: .greatestFiniteMagnitude),
+            options: [.usesLineFragmentOrigin, .usesFontLeading],
+            attributes: [.font: font])
+        let verticalPadding: CGFloat = 12 * 2     // .padding(.vertical, 12)
+        let height = min(max(ceil(bounding.height) + verticalPadding, minResultHeight), maxResultHeight)
+        return NSSize(width: resultWidth, height: height)
     }
 
-    private func positionAtBottomCenter() {
+    /// Tamaño objetivo según el contenido actual.
+    private func targetSize() -> NSSize {
+        if model.transientText != nil { return pendingResultSize }
+        switch model.state {
+        case .recording: return Self.recordingSize
+        case .processing: return Self.processingSize
+        case .idle: return Self.armedSize   // solo visible si `armed`
+        }
+    }
+
+    /// Redimensiona la píldora al tamaño de su contenido y la recentra
+    /// abajo-centro, opcionalmente ANIMADO (transición suave entre estados en
+    /// vez de un salto). Reemplaza el viejo tamaño fijo gigante.
+    private func applyLayout(animated: Bool) {
         // NSScreen.main returns the screen with the key window (follows focus); intentional for dictation HUD positioning
         guard let screen = NSScreen.main else { return }
         let visible = screen.visibleFrame
-        let size = panel.frame.size
-        panel.setFrameOrigin(NSPoint(
-            x: visible.midX - size.width / 2,
-            y: visible.minY + 24))
+        let size = targetSize()
+        let origin = NSPoint(x: visible.midX - size.width / 2, y: visible.minY + 24)
+        panel.setFrame(NSRect(origin: origin, size: size), display: true, animate: animated)
     }
 }
