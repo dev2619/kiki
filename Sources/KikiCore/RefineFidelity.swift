@@ -55,6 +55,38 @@ public enum RefineFidelity {
         return noveltyRatio <= maxNoveltyRatio
     }
 
+    /// Muletillas/rellenos que el refinado SÍ puede borrar legítimamente — se
+    /// excluyen del chequeo de cobertura para no penalizar una limpieza real.
+    /// (Alineado con la lista del prompt de refinado.)
+    static let fillerTokens: Set<String> = [
+        "eh", "em", "este", "pues", "bueno", "osea", "o", "sea", "entonces",
+        "digamos", "like", "uh", "um", "mmm", "ah", "mm", "eeh",
+    ]
+
+    /// Fracción MÍNIMA de las palabras de contenido del original (excluidas las
+    /// muletillas) que deben seguir presentes en el refinado. Por debajo de
+    /// esto, el refinado BORRÓ/reordenó contenido real (no solo limpió) — modo
+    /// de fallo del bug de campo 2026-07-17: "Yo no dije aquí, dije Kiki." →
+    /// "Kiki dije aquí" (perdió la negación). La guardia de novelty no lo veía
+    /// porque no agregó vocabulario; esta de cobertura sí.
+    public static let minContentCoverage = 0.8
+
+    /// `true` si el refinado PRESERVA el contenido del original: la mayoría de
+    /// las palabras de contenido (sin muletillas) del original siguen presentes.
+    /// Complementa a `isFaithful` (que ataca palabras AÑADIDAS) atacando el modo
+    /// inverso: palabras BORRADAS/reordenadas que cambian el sentido.
+    public static func preservesContent(
+        original: String,
+        refined: String,
+        minCoverage: Double = minContentCoverage
+    ) -> Bool {
+        let originalContent = Set(tokenize(original)).subtracting(fillerTokens)
+        guard !originalContent.isEmpty else { return true }
+        let refinedTokens = Set(tokenize(refined))
+        let preserved = originalContent.filter { refinedTokens.contains($0) }.count
+        return Double(preserved) / Double(originalContent.count) >= minCoverage
+    }
+
     /// Normaliza a palabras comparables: minúsculas, sin acentos, partido por
     /// cualquier cosa que no sea letra o dígito. Así "Repositorios," y
     /// "repositorios" cuentan igual, y la puntuación (que el refinado sí puede

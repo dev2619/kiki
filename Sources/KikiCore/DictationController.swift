@@ -405,6 +405,15 @@ public final class DictationController {
                 KikiLog.log("kiki core: refinado infiel (vocabulario nuevo) — uso texto crudo")
                 return text
             }
+            // Guardia de cobertura (bugfix 2026-07-17): el refinado BORRÓ/
+            // reordenó contenido real y cambió el sentido ("Yo no dije aquí,
+            // dije Kiki." → "Kiki dije aquí" perdió la negación). La guardia de
+            // novelty no lo ve (no agregó palabras); esta sí. No aplica al
+            // traducir (cambia todo el vocabulario por diseño).
+            if !translate && !RefineFidelity.preservesContent(original: text, refined: trimmedRefined) {
+                KikiLog.log("kiki core: refinado infiel (perdió contenido) — uso texto crudo")
+                return text
+            }
             KikiLog.log("kiki core: refinado (\(profile.rawValue), idioma \(language), traducir \(translate)) en \(String(format: "%.2f", Date().timeIntervalSince(started)))s: \"\(trimmedRefined)\"")
             return trimmedRefined
         } catch {

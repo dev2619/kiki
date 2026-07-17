@@ -76,6 +76,29 @@ final class RefineFidelityTests: XCTestCase {
             refined: "Revisa la configuracion automatica."))
     }
 
+    // MARK: - Coverage guard (deleted / reordered content)
+
+    func testFieldCase_DroppedNegationIsNotPreserved() {
+        // Bug de campo 2026-07-17: el refinador perdió "Yo no" (la negación) y
+        // reordenó. novelty=0 (no agregó palabras), pero borró contenido.
+        XCTAssertFalse(RefineFidelity.preservesContent(
+            original: "Yo no dije aquí, dije Kiki.",
+            refined: "Kiki dije aquí"))
+    }
+
+    func testFillerRemovalPreservesContent() {
+        // Quitar muletillas NO debe fallar la cobertura.
+        XCTAssertTrue(RefineFidelity.preservesContent(
+            original: "eh dame la lista o sea los automatizados",
+            refined: "Dame la lista, los automatizados."))
+    }
+
+    func testPunctuationOnlyPreservesContent() {
+        XCTAssertTrue(RefineFidelity.preservesContent(
+            original: "necesito que revises el pipeline de ci",
+            refined: "Necesito que revises el pipeline de CI."))
+    }
+
     func testTokenizeStripsPunctuation() {
         XCTAssertEqual(
             RefineFidelity.tokenize("Hola, ¿cómo estás? ¡Bien!"),
