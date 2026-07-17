@@ -1096,10 +1096,14 @@ final class DictationControllerTests: XCTestCase {
         XCTAssertEqual(delegate.livePartials.last ?? "sentinel", nil, "partial must be cleared (nil) on release")
     }
 
-    func test_liveReleaseNeverCallsRefinerEvenWhenRefineEnabled() async {
+    // Calidad "sobresaliente" (2026-07-17): el contrato CAMBIÓ — el pase final
+    // del streaming SÍ pasa por el refinador (puntuación, mayúsculas, acentos,
+    // comillas) para igualar a los tops de mercado. El preview en vivo sigue
+    // crudo; lo que se INSERTA queda pulido, igual que el modo batch.
+    func test_liveReleaseRefinesFinalWhenRefineEnabled() async {
         let (coordinator, _) = makeLiveCoordinator(scriptedTexts: ["final live text"])
         let refiner = MockRefiner()
-        refiner.textToReturn = "should never be used"
+        refiner.textToReturn = "final live text refined"
         let context = MockContext()
         controller = DictationController(
             recorder: recorder, transcriber: transcriber, inserter: inserter,
@@ -1111,14 +1115,14 @@ final class DictationControllerTests: XCTestCase {
         controller.hotkeyPressed()
         await controller.hotkeyReleased()
 
-        XCTAssertTrue(refiner.receivedTexts.isEmpty, "refiner must never be invoked for a live dictation, even with refineEnabled true")
-        XCTAssertEqual(inserter.inserted, ["final live text"])
+        XCTAssertEqual(refiner.receivedTexts, ["final live text"], "the streaming final IS refined now")
+        XCTAssertEqual(inserter.inserted, ["final live text refined"])
     }
 
-    func test_liveReleaseNeverCallsTranslateEvenWhenTranslateEnabled() async {
+    func test_liveReleaseTranslatesFinalWhenTranslateEnabled() async {
         let (coordinator, _) = makeLiveCoordinator(scriptedTexts: ["final live text"])
         let refiner = MockRefiner()
-        refiner.textToReturn = "should never be used"
+        refiner.textToReturn = "texto final traducido"
         let context = MockContext()
         controller = DictationController(
             recorder: recorder, transcriber: transcriber, inserter: inserter,
@@ -1130,9 +1134,9 @@ final class DictationControllerTests: XCTestCase {
         controller.hotkeyPressed()
         await controller.hotkeyReleased()
 
-        XCTAssertTrue(refiner.receivedTexts.isEmpty, "translate must never run for a live dictation, even with translateEnabled true")
-        XCTAssertTrue(refiner.receivedTranslateFlags.isEmpty)
-        XCTAssertEqual(inserter.inserted, ["final live text"])
+        XCTAssertEqual(refiner.receivedTexts, ["final live text"], "the streaming final IS translated now")
+        XCTAssertEqual(refiner.receivedTranslateFlags, [true])
+        XCTAssertEqual(inserter.inserted, ["texto final traducido"])
     }
 
     func test_liveReleaseRecordsHistory() async {

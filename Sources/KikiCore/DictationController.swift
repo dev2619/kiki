@@ -162,8 +162,14 @@ public final class DictationController {
             // en el momento de `stop()`.
             let final = await liveSession.finish(fullAudio: samples)
             let audioSeconds = Double(samples.count) / sampleRate
-            let language = "es" // bypassEnhancement ignora language; se evita el await muerto.
-            await processTranscriptContent(final, audioSeconds: audioSeconds, language: language, bypassEnhancement: true)
+            // Calidad "sobresaliente" (2026-07-17): el pase final del streaming
+            // SÍ pasa por el refinador (puntuación, mayúsculas, acentos,
+            // comillas) — como el modo batch — para igualar a los tops de
+            // mercado. El preview en vivo sigue crudo/rápido; lo que se INSERTA
+            // queda pulido. Idioma: el bloqueado por la sesión de streaming (o
+            // el forzado por el usuario), para refinar en el idioma correcto.
+            let language = liveSession.detectedLanguage ?? forcedLanguage() ?? "es"
+            await processTranscriptContent(final, audioSeconds: audioSeconds, language: language, bypassEnhancement: false)
             // Limpia la burbuja DESPUÉS de insertar — ver comentario arriba.
             delegate?.dictationLivePartialDidChange(nil)
             return

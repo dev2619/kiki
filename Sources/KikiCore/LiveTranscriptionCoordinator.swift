@@ -55,6 +55,10 @@ public final class LiveTranscriptionCoordinator {
     /// usuario o detectado en el primer pase con suficiente audio). `nil` hasta
     /// entonces. Se pasa a todos los pases y al pase final.
     private var lockedLanguage: String?
+
+    /// Idioma resuelto de la sesión ("es"/"en"), para que el caller refine el
+    /// pase final en el idioma correcto. `nil` si nunca se llegó a fijar.
+    public var detectedLanguage: String? { lockedLanguage }
     /// Mínimo de audio (muestras) antes de intentar detectar idioma en Auto —
     /// la detección de Whisper sobre <1.5s es poco fiable (elegía sueco/coreano
     /// para español corto).
