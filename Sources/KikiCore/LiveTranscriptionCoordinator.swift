@@ -258,7 +258,13 @@ public final class LiveTranscriptionCoordinator {
         joinSegments(confirmedSegments + unconfirmedSegments)
     }
     private func joinSegments(_ segments: [LiveSegment]) -> String {
-        segments.map(\.text).joined()
+        // Con ESPACIO entre segmentos: `stripSpecialTokens` recorta el espacio
+        // inicial de cada segmento, así que unir sin separador pegaba la última
+        // palabra de un segmento con la primera del siguiente ("ideaprincipal",
+        // "diapositivases"). Se ignoran segmentos vacíos y se colapsan dobles.
+        segments.map { $0.text.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
             .replacingOccurrences(of: "  ", with: " ")
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
