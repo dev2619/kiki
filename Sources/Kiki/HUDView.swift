@@ -22,11 +22,17 @@ final class HUDModel: ObservableObject {
 struct HUDView: View {
     @ObservedObject var model: HUDModel
 
-    // Recorren TODO el contorno; hues bien repartidos para que hasta los
-    // lados largos de la píldora muestren variación (no un solo color).
+    // Relleno interior (gradiente angular): hues repartidos alrededor.
     private let colors: [Color] = [
         Color(hex: 0x7C5CFF), Color(hex: 0x38BDF8), Color(hex: 0x34D399),
         Color(hex: 0xEC6EAD), Color(hex: 0xA78BFA), Color(hex: 0x7C5CFF),
+    ]
+    // Segmentos de color que TILAN el contorno y se desplazan a lo largo del
+    // perímetro (via `trim`) → multicolor real en todo el borde + movimiento,
+    // en vez de un gradiente angular que se comprime en los lados largos.
+    private let ringPalette: [Color] = [
+        Color(hex: 0x7C5CFF), Color(hex: 0x38BDF8), Color(hex: 0x34D399),
+        Color(hex: 0xEC6EAD), Color(hex: 0xA78BFA),
     ]
     private var accent: Color { Color(hex: 0xA78BFA) }
     private var pink: Color { Color(hex: 0xEC6EAD) }
@@ -149,18 +155,54 @@ struct HUDView: View {
             startAngle: .degrees(deg), endAngle: .degrees(deg + 360))
     }
 
+    /// Un arco del contorno entre las fracciones `a`..`b` del perímetro
+    /// (envuelve si `b` cruza 1). Insetado media línea para quedar DENTRO.
+    @ViewBuilder
+    private func ringArc(from a: Double, to b: Double, color: Color, lineWidth: CGFloat) -> some View {
+        let start = a - a.rounded(.down)          // parte fraccionaria [0,1)
+        let end = start + (b - a)
+        let style = StrokeStyle(lineWidth: lineWidth, lineCap: .round)
+        let shape = Capsule().inset(by: lineWidth / 2 + 0.5)
+        if end <= 1 {
+            shape.trim(from: start, to: end).stroke(color, style: style)
+        } else {
+            shape.trim(from: start, to: 1).stroke(color, style: style)
+            shape.trim(from: 0, to: end - 1).stroke(color, style: style)
+        }
+    }
+
+    /// Contorno multicolor: `ringPalette.count` segmentos solapados que se
+    /// desplazan juntos (offset `t`) → todo el borde muestra colores y se ven
+    /// MOVER a lo largo del perímetro.
+    @ViewBuilder
+    private func multicolorRing(_ t: Double, lineWidth: CGFloat) -> some View {
+        let n = ringPalette.count
+        let seg = 1.0 / Double(n)
+        ZStack {
+            ForEach(0..<n, id: \.self) { i in
+                ringArc(from: t + Double(i) * seg,
+                        to: t + Double(i) * seg + seg * 1.3,   // solape → mezcla suave
+                        color: ringPalette[i], lineWidth: lineWidth)
+            }
+        }
+    }
+
     @ViewBuilder
     private var edgeGlow: some View {
         TimelineView(.animation) { timeline in
-            let deg = timeline.date.timeIntervalSinceReferenceDate * 100  // ~3.6s/vuelta
+            let time = timeline.date.timeIntervalSinceReferenceDate
+            let t = time * 0.27                                   // fracción de perímetro / s
+            let comet = (time * 0.62).truncatingRemainder(dividingBy: 1)
             ZStack {
-                // Neón: brillo difuso que se queda DENTRO del contorno.
-                Capsule().strokeBorder(conic(deg), lineWidth: 6).blur(radius: 6)
-                // Trazo nítido justo sobre el borde.
-                Capsule().strokeBorder(conic(deg), lineWidth: 1.6)
+                multicolorRing(t, lineWidth: 5).blur(radius: 7).opacity(0.8)   // neón difuso
+                multicolorRing(t, lineWidth: 2).blur(radius: 1.1)             // trazo nítido
+                // Luz brillante que VIAJA por el borde (glow + núcleo).
+                ringArc(from: comet, to: comet + 0.08, color: .white, lineWidth: 2.4)
+                    .blur(radius: 2.6).opacity(0.85)
+                ringArc(from: comet, to: comet + 0.05, color: .white, lineWidth: 1.2)
+                    .opacity(0.95)
             }
-            // Clip a la cápsula → el glow NUNCA se derrama fuera del contorno
-            // (antes el blur lo recortaba el marco rectangular del panel).
+            // Clip a la cápsula → el glow NUNCA se derrama fuera del contorno.
             .clipShape(Capsule())
             .opacity(isProcessing ? 1 : 0)
             .animation(.easeInOut(duration: 0.35), value: isProcessing)
@@ -177,8 +219,8 @@ struct HUDView: View {
                 let deg = timeline.date.timeIntervalSinceReferenceDate * 80
                 Capsule()
                     .fill(conic(deg))
-                    .blur(radius: 26)
-                    .opacity(isProcessing ? 0.22 : 0)
+                    .blur(radius: 24)
+                    .opacity(isProcessing ? 0.42 : 0)
                     .animation(.easeInOut(duration: 0.4), value: isProcessing)
             }
             .clipShape(Capsule())

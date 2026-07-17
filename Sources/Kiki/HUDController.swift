@@ -8,10 +8,11 @@ import KikiCore
 final class HUDController {
     /// Duración fija del pill transitorio (`showTransient`) antes de
     /// auto-restaurar la vista normal — ver doc ahí.
-    private static let transientDuration: UInt64 = 2_200_000_000 // 2.2s en ns
+    private static let transientDuration: UInt64 = 4_000_000_000 // 4s en ns (da tiempo a leer)
     /// Gracia tras salir el cursor de la nube (hover-para-persistir): se oculta
-    /// poco después de que el cursor la abandona, no de golpe.
-    private static let hoverExitGrace: UInt64 = 600_000_000 // 0.6s en ns
+    /// poco después de que el cursor la abandona, no de golpe. Tolerante a un
+    /// roce fuera del borde.
+    private static let hoverExitGrace: UInt64 = 1_300_000_000 // 1.3s en ns
     /// Tamaños por estado (compactos — la píldora NO es una barra gigante
     /// vacía). El cambio entre estados es una transición ANIMADA suave (ver
     /// `applyLayout`), no un salto por-palabra: grabando/procesando comparten
@@ -37,12 +38,8 @@ final class HUDController {
     private var pendingResultSize = NSSize(width: 440, height: 58)
     /// Estado actual del hover sobre la nube de resultado (para no re-disparar).
     private var resultHovered = false
-    /// Monitores de ratón (global + local). Se comparan contra el frame del
-    /// panel vía `NSEvent.mouseLocation`, así el hover funciona AUNQUE kiki no
-    /// sea la app activa (el usuario dicta en otra app) — `onHover` de SwiftUI
-    /// no dispara sin foco de app. Además el panel sigue ignorando clics.
-    private var globalMouseMonitor: Any?
-    private var localMouseMonitor: Any?
+    /// Evita lanzar más de un bucle de sondeo de hover a la vez.
+    private var hoverPollActive = false
 
     init() {
         panel = NSPanel(
@@ -62,20 +59,24 @@ final class HUDController {
         panel.ignoresMouseEvents = true
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         panel.contentView = NSHostingView(rootView: HUDView(model: model))
-        // Hover-para-persistir: seguimos la posición del cursor globalmente y
-        // la comparamos con el frame del panel (ver `checkHover`).
-        globalMouseMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.mouseMoved]) { [weak self] _ in
-            self?.checkHover()
-        }
-        localMouseMonitor = NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved]) { [weak self] event in
-            self?.checkHover()
-            return event
-        }
     }
 
-    deinit {
-        if let m = globalMouseMonitor { NSEvent.removeMonitor(m) }
-        if let m = localMouseMonitor { NSEvent.removeMonitor(m) }
+    /// Sondea la posición del cursor mientras el resultado esté visible y la
+    /// compara con el frame del panel. `NSEvent.mouseLocation` devuelve la
+    /// posición actual sin depender de que lleguen eventos ni de que kiki sea
+    /// la app activa (el usuario dicta en otra app) — por eso funciona aquí
+    /// donde `onHover` de SwiftUI y los monitores globales no. El panel sigue
+    /// ignorando clics.
+    private func startHoverPolling() {
+        guard !hoverPollActive else { return }
+        hoverPollActive = true
+        Task { @MainActor [weak self] in
+            while let strong = self, strong.model.transientText != nil {
+                strong.checkHover()
+                try? await Task.sleep(nanoseconds: 90_000_000) // 90ms
+            }
+            self?.hoverPollActive = false
+        }
     }
 
     /// Compara la posición del cursor con el frame del panel y traduce el
@@ -107,7 +108,11 @@ final class HUDController {
             if model.armed {
                 applyLayout(animated: true)
                 panel.orderFrontRegardless()
-            } else {
+            } else if model.transientText == nil {
+                // Con un RESULTADO transitorio visible NO ocultamos aquí: el
+                // dictado por hotkey pasa a `.idle` justo tras `showTransient`
+                // (dictationDidInsert → dictationStateDidChange). Su propio
+                // timer (y el hover-para-persistir) gobiernan cuándo se oculta.
                 panel.orderOut(nil)
             }
         case .recording, .processing:
@@ -157,6 +162,7 @@ final class HUDController {
         resultHovered = false
         applyLayout(animated: true)
         panel.orderFrontRegardless()
+        startHoverPolling()
         scheduleTransientDismiss(delay: Self.transientDuration)
     }
 
