@@ -206,9 +206,25 @@ private struct GeneralSectionView: View {
             }
 
             Section {
-                Toggle("Restaurar clipboard anterior tras dictar", isOn: $viewModel.restoreClipboardAfterDictation)
+                Picker("Idioma del dictado", selection: $viewModel.dictationLanguage) {
+                    Text("Auto (detectar)").tag(SettingsViewModel.DictationLanguage.auto)
+                    Text("Español").tag(SettingsViewModel.DictationLanguage.es)
+                    Text("English").tag(SettingsViewModel.DictationLanguage.en)
+                }
             } footer: {
-                Text("Con esto desactivado (por defecto), el texto dictado queda en tu portapapeles después de insertarse — listo para pegarlo con ⌘V en cualquier otro lado. Actívalo si prefieres que kiki devuelva al portapapeles lo que tenías copiado antes de dictar.")
+                Text("Auto deja que kiki detecte el idioma en cada dictado. Si dictas siempre en un idioma, fíjalo aquí (o desde el menú de la barra): es 100% fiable y más rápido — la autodetección local puede fallar en frases cortas y forzar el idioma equivocado.")
+            }
+
+            Section {
+                Toggle("Pegar automáticamente en el cursor", isOn: $viewModel.autoPasteEnabled)
+            } footer: {
+                Text("Activado (por defecto), kiki pega el dictado con ⌘V donde tengas el cursor. Desactívalo si prefieres que el texto solo quede en el portapapeles y pegarlo tú mismo con ⌘V.")
+            }
+
+            Section {
+                Toggle("Copiar al portapapeles", isOn: $viewModel.copyToClipboardEnabled)
+            } footer: {
+                Text("Activado (por defecto), el texto dictado queda en tu portapapeles tras insertarse — listo para volver a pegarlo. Desactívalo si prefieres que kiki NO deje rastro: pega el texto y restaura lo que tenías copiado antes de dictar.")
             }
 
             Section("Dictado") {

@@ -231,29 +231,103 @@ final class SettingsViewModel: ObservableObject {
     /// `AppDelegate` pueda invocarla desde closures que no corren en
     /// `MainActor` (p. ej. `WakeListener.onArmedChunk`, confinado a la cola
     /// serial del listener antes del salto a `@MainActor`).
+    /// Default OFF desde el rediseño 2026-07-16 ("solo onda"): el HUD ya no
+    /// muestra parciales en vivo (durante el dictado se ve una onda), así que
+    /// los pases intermedios no aportan nada visible y además detectaban
+    /// idioma sobre audio corto/ventaneado de forma poco fiable (Whisper daba
+    /// ko/ms→es y contaminaba el idioma del dictado). En modo batch (off) el
+    /// único pase corre sobre el buffer COMPLETO → detección de idioma
+    /// fiable. El toggle sigue disponible para quien quiera el streaming.
     nonisolated static func effectiveLiveTranscription() -> Bool {
         let defaults = UserDefaults.standard
         return defaults.object(forKey: liveTranscriptionDefaultsKey) != nil
             ? defaults.bool(forKey: liveTranscriptionDefaultsKey)
-            : true
+            : false
     }
 
-    /// F2 (spec 2026-07-11): tras dictar, la transcripción queda en el
-    /// clipboard por defecto. Este toggle opt-in restaura el contenido
-    /// anterior del clipboard ~0.4s después del paste (comportamiento
-    /// pre-0.9.2). Sin efectos de ciclo de vida: `PasteInserter` lee la
-    /// preferencia en cada insert vía closure, así que el cambio aplica
-    /// en caliente sin notificaciones.
-    @Published var restoreClipboardAfterDictation: Bool {
+    /// Salida del transcript — dos toggles independientes (2026-07-16),
+    /// ambos default ON, leídos por `PasteInserter` en cada insert (aplican
+    /// en caliente, sin notificaciones):
+    /// - `copyToClipboardEnabled`: el texto QUEDA en el portapapeles.
+    /// - `autoPasteEnabled`: se sintetiza ⌘V para insertarlo en el cursor.
+    /// Reemplazan al viejo `restoreClipboardAfterDictation` — "no copiar"
+    /// equivale a lo que antes hacía "restaurar clipboard".
+    @Published var copyToClipboardEnabled: Bool {
         didSet {
             UserDefaults.standard.set(
-                restoreClipboardAfterDictation, forKey: Self.restoreClipboardDefaultsKey)
+                copyToClipboardEnabled, forKey: Self.copyToClipboardDefaultsKey)
         }
     }
 
-    /// `nonisolated`: `AppDelegate` construye el `PasteInserter` (y su
-    /// closure lee esta key) fuera del init de SettingsViewModel.
+    @Published var autoPasteEnabled: Bool {
+        didSet {
+            UserDefaults.standard.set(autoPasteEnabled, forKey: Self.autoPasteDefaultsKey)
+        }
+    }
+
+    /// `nonisolated`: `AppDelegate` construye el `PasteInserter` (y sus
+    /// closures leen estas keys) fuera del init de SettingsViewModel.
+    nonisolated static let copyToClipboardDefaultsKey = "kiki.copyToClipboard"
+    nonisolated static let autoPasteDefaultsKey = "kiki.autoPaste"
+    /// Solo para migración one-shot desde el toggle viejo (ver `init`).
     nonisolated static let restoreClipboardDefaultsKey = "kiki.restoreClipboard"
+
+    /// Lecturas ausente→`true` (default ON), mirror de
+    /// `effectiveLiveTranscription`. `nonisolated` para que `AppDelegate` las
+    /// lea desde las closures del `PasteInserter`.
+    nonisolated static func effectiveCopyToClipboard() -> Bool {
+        let defaults = UserDefaults.standard
+        return defaults.object(forKey: copyToClipboardDefaultsKey) != nil
+            ? defaults.bool(forKey: copyToClipboardDefaultsKey)
+            : true
+    }
+
+    /// Idioma de dictado elegido por el usuario (2026-07-16): `auto` deja que
+    /// Whisper detecte; `es`/`en` lo FUERZAN (salta la detección, que en
+    /// clips cortos/con acento devolvía basura —vi/ko/ms— y forzaba español
+    /// en dictados en inglés). Para quien no mezcla idiomas, fijarlo es 100%
+    /// fiable y además más rápido.
+    enum DictationLanguage: String, CaseIterable {
+        case auto, es, en
+    }
+
+    @Published var dictationLanguage: DictationLanguage {
+        didSet {
+            UserDefaults.standard.set(dictationLanguage.rawValue, forKey: Self.dictationLanguageKey)
+        }
+    }
+
+    nonisolated static let dictationLanguageKey = "kiki.dictationLanguage"
+
+    /// `nil` = auto (detectar); `"es"`/`"en"` = idioma forzado. `nonisolated`
+    /// para que `AppDelegate` lo lea desde la closure del `DictationController`.
+    nonisolated static func effectiveDictationLanguage() -> String? {
+        switch UserDefaults.standard.string(forKey: dictationLanguageKey) {
+        case "es": return "es"
+        case "en": return "en"
+        default: return nil
+        }
+    }
+
+    nonisolated static func effectiveAutoPaste() -> Bool {
+        let defaults = UserDefaults.standard
+        return defaults.object(forKey: autoPasteDefaultsKey) != nil
+            ? defaults.bool(forKey: autoPasteDefaultsKey)
+            : true
+    }
+
+    /// Migración one-shot (2026-07-16): el toggle viejo "Restaurar clipboard
+    /// anterior" == true significaba "no dejar el texto en el portapapeles",
+    /// hoy expresado como `copyToClipboard = false`. Se corre una vez si el
+    /// usuario tenía la preferencia vieja seteada y aún no existe la nueva.
+    nonisolated static func migrateRestoreClipboardIfNeeded() {
+        let defaults = UserDefaults.standard
+        guard defaults.object(forKey: copyToClipboardDefaultsKey) == nil,
+              defaults.object(forKey: restoreClipboardDefaultsKey) != nil else { return }
+        if defaults.bool(forKey: restoreClipboardDefaultsKey) {
+            defaults.set(false, forKey: copyToClipboardDefaultsKey)
+        }
+    }
 
     /// Cap configurable del Historial (Ajustes → Historial, control
     /// "cantidad a conservar"), default 200 — mismo default que
@@ -354,8 +428,14 @@ final class SettingsViewModel: ObservableObject {
             ? defaults.bool(forKey: Self.alwaysListeningDefaultsKey)
             : true
         self.liveTranscriptionEnabled = Self.effectiveLiveTranscription()
-        self.restoreClipboardAfterDictation =
-            UserDefaults.standard.bool(forKey: Self.restoreClipboardDefaultsKey)
+        // Migrar el toggle viejo ANTES de leer las keys nuevas (ver
+        // `migrateRestoreClipboardIfNeeded`).
+        Self.migrateRestoreClipboardIfNeeded()
+        self.copyToClipboardEnabled = Self.effectiveCopyToClipboard()
+        self.autoPasteEnabled = Self.effectiveAutoPaste()
+        self.dictationLanguage = DictationLanguage(
+            rawValue: UserDefaults.standard.string(forKey: Self.dictationLanguageKey) ?? "")
+            ?? .auto
         // `integer(forKey:)` devuelve 0 cuando la clave está ausente — un cap
         // de 0 no tiene sentido, así que se trata como "sin configurar" y cae
         // al default 200 (mismo default que `HistoryStore.init(cap:)`).

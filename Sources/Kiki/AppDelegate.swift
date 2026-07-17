@@ -12,6 +12,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private static let wakeEnabledKey = "kiki.wakeEnabled"
     private static let wakeMenuItemTag = 2
     private static let translateMenuItemTag = 3
+    private static let autoPasteMenuItemTag = 4
+    private static let copyClipboardMenuItemTag = 5
+    private static let languageMenuItemTag = 6
     /// Umbral RMS de habla para `WakeListener`, calibrable en campo sin
     /// rebuild — ver `WakeListener.init`. Ejemplo de uso en un mic marginal:
     /// `defaults write com.dev2619.kiki kiki.wakeRMSThreshold 0.004`.
@@ -208,9 +211,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         controller = DictationController(
             recorder: recorder,
             transcriber: transcriber,
-            inserter: PasteInserter(restoresClipboard: {
-                UserDefaults.standard.bool(forKey: SettingsViewModel.restoreClipboardDefaultsKey)
-            }),
+            inserter: PasteInserter(
+                copyEnabled: { SettingsViewModel.effectiveCopyToClipboard() },
+                autoPasteEnabled: { SettingsViewModel.effectiveAutoPaste() }),
             refiner: refiner,
             context: appContext,
             snippets: snippetAdapter,
@@ -237,6 +240,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // cada refinado, sin efectos de ciclo de vida. `?? true` respeta el
             // default ON si el settingsViewModel aún no existe.
             refineEnabled: { [weak self] in self?.settingsViewModel.refineEnabled ?? true },
+            forcedLanguage: { SettingsViewModel.effectiveDictationLanguage() },
             // F1 Task 5: interruptor "Transcripción en vivo" (default ON). Lee
             // `UserDefaults` directo vía el helper estático de
             // `SettingsViewModel` (no la instancia) — mismo motivo que
@@ -253,7 +257,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // `DictationController.liveCoordinatorFactory`.
             liveCoordinatorFactory: { [weak self] in
                 guard let self else { return nil }
-                return LiveTranscriptionCoordinator(transcriber: self.transcriber)
+                // Intervalos más ágiles que el default (0.8s/0.4s) para que
+                // la nube se sienta en TIEMPO REAL: parciales ~2× más
+                // frecuentes. El modelo 954MB transcribe en 0.2-0.7s (ver
+                // kiki.log), así que un pase cada 0.45s no se solapa ni se
+                // atrasa en utterances normales.
+                return LiveTranscriptionCoordinator(
+                    transcriber: self.transcriber,
+                    minPassInterval: 0.45,
+                    minNewAudioSeconds: 0.25,
+                    maxLivePassSeconds: 6.0)
             })
         controller.delegate = self
 
@@ -374,6 +387,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // reordenar el arranque solo por esto.
         translateItem.state = UserDefaults.standard.bool(forKey: SettingsViewModel.translateEnabledDefaultsKey) ? .on : .off
         menu.addItem(translateItem)
+
+        let autoPasteItem = NSMenuItem(
+            title: "Pegar automáticamente",
+            action: #selector(toggleAutoPaste),
+            keyEquivalent: "")
+        autoPasteItem.target = self
+        autoPasteItem.tag = Self.autoPasteMenuItemTag
+        autoPasteItem.state = SettingsViewModel.effectiveAutoPaste() ? .on : .off
+        menu.addItem(autoPasteItem)
+
+        let copyItem = NSMenuItem(
+            title: "Copiar al portapapeles",
+            action: #selector(toggleCopyToClipboard),
+            keyEquivalent: "")
+        copyItem.target = self
+        copyItem.tag = Self.copyClipboardMenuItemTag
+        copyItem.state = SettingsViewModel.effectiveCopyToClipboard() ? .on : .off
+        menu.addItem(copyItem)
+
+        let languageItem = NSMenuItem(
+            title: Self.languageMenuTitle(),
+            action: #selector(cycleDictationLanguage),
+            keyEquivalent: "")
+        languageItem.target = self
+        languageItem.tag = Self.languageMenuItemTag
+        menu.addItem(languageItem)
         menu.addItem(.separator())
 
         menu.addItem(NSMenuItem(
@@ -439,6 +478,53 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let statusItem else { return }
         statusItem.menu?.item(withTag: Self.translateMenuItemTag)?.state =
             settingsViewModel.translateEnabled ? .on : .off
+    }
+
+    /// Toggles de salida del transcript desde el tray. Mutan la única fuente
+    /// de verdad (`settingsViewModel`, persistida en su `didSet`) y actualizan
+    /// el checkmark. La ventana de Ajustes (que bindea a la misma propiedad
+    /// `@Published`) refleja el cambio en vivo; el sentido inverso
+    /// (Ajustes→tray) queda cosmético hasta reabrir el menú, aceptable porque
+    /// el valor efectivo se lee fresco en cada insert.
+    @MainActor @objc private func toggleAutoPaste() {
+        settingsViewModel.autoPasteEnabled.toggle()
+        statusItem?.menu?.item(withTag: Self.autoPasteMenuItemTag)?.state =
+            settingsViewModel.autoPasteEnabled ? .on : .off
+    }
+
+    @MainActor @objc private func toggleCopyToClipboard() {
+        settingsViewModel.copyToClipboardEnabled.toggle()
+        statusItem?.menu?.item(withTag: Self.copyClipboardMenuItemTag)?.state =
+            settingsViewModel.copyToClipboardEnabled ? .on : .off
+    }
+
+    /// Título del ítem de idioma en el tray según la preferencia actual.
+    /// `nonisolated` porque `setUpStatusItem()` (nonisolated) lo usa y solo
+    /// lee `UserDefaults` (no aislado a ningún actor).
+    nonisolated private static func languageMenuTitle() -> String {
+        switch effectiveDictationLanguageLabel() {
+        case "es": return "Idioma: Español"
+        case "en": return "Idioma: English"
+        default: return "Idioma: Auto (detectar)"
+        }
+    }
+
+    nonisolated private static func effectiveDictationLanguageLabel() -> String {
+        SettingsViewModel.effectiveDictationLanguage() ?? "auto"
+    }
+
+    /// Cicla el idioma de dictado Auto → Español → English → Auto y actualiza
+    /// el título del ítem. Fijar ES/EN salta la detección (fiable + rápido);
+    /// Auto deja que Whisper detecte.
+    @MainActor @objc private func cycleDictationLanguage() {
+        let next: SettingsViewModel.DictationLanguage
+        switch settingsViewModel.dictationLanguage {
+        case .auto: next = .en
+        case .en: next = .es
+        case .es: next = .auto
+        }
+        settingsViewModel.dictationLanguage = next
+        statusItem?.menu?.item(withTag: Self.languageMenuItemTag)?.title = Self.languageMenuTitle()
     }
 
     @MainActor @objc private func toggleWake() {
@@ -595,7 +681,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// `liveEnabled()` en `false`.
     @MainActor private func startWakeLiveIfEnabled(_ chunk: [Float]) {
         guard SettingsViewModel.effectiveLiveTranscription() else { return }
-        let coordinator = LiveTranscriptionCoordinator(transcriber: transcriber)
+        // Mismos intervalos ágiles que el flujo hotkey (ver
+        // `liveCoordinatorFactory`) para que el manos-libres también pinte
+        // parciales en tiempo real.
+        let coordinator = LiveTranscriptionCoordinator(
+            transcriber: transcriber,
+            minPassInterval: 0.45,
+            minNewAudioSeconds: 0.25,
+            maxLivePassSeconds: 6.0)
         coordinator.onPartial = { [weak self] text in self?.hud.updateLiveText(text) }
         coordinator.start()
         coordinator.append(chunk)
@@ -863,18 +956,16 @@ extension AppDelegate: DictationControllerDelegate {
     /// autolimpiable a 1.2s, con precedencia sobre la burbuja live — que para
     /// este punto ya se limpió, ver `dictationLivePartialDidChange(nil)` en
     /// el camino de `finish`/`cancel`) así que no hace falta UI nueva. El
-    /// texto depende de si el clipboard va a conservar la transcripción:
-    /// `PasteInserter` (ver su construcción arriba) restaura el clipboard
-    /// previo ~0.4s después del paste cuando el toggle
-    /// `restoreClipboardDefaultsKey` está en `true` — en ese caso el texto YA
-    /// NO queda disponible para pegar de nuevo, así que el toast NO promete
-    /// portapapeles.
-    func dictationDidInsert() {
+    /// texto del toast refleja los dos toggles de salida (`autoPaste` /
+    /// `copyToClipboard`, ver la construcción del `PasteInserter` arriba).
+    func dictationDidInsert(_ text: String) {
         SoundCues.play(.inserted)
         NotificationCenter.default.post(name: .kikiDictationInserted, object: nil)
-        let restoresClipboard = UserDefaults.standard.bool(
-            forKey: SettingsViewModel.restoreClipboardDefaultsKey)
-        hud.showTransient(restoresClipboard ? "✓ Insertado" : "✓ Insertado — en tu portapapeles")
+        // Rediseño 2026-07-16: la píldora muestra el TEXTO FINAL que se pegó
+        // (coherente con el portapapeles), con un ✓, un instante. El texto
+        // completo ya quedó en la app del usuario; aquí es confirmación.
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        hud.showTransient(trimmed.isEmpty ? "✓ Listo" : "✓ " + trimmed)
     }
 
     /// F1 Task 5: parciales del flujo HOTKEY (`DictationController.liveChunk`
