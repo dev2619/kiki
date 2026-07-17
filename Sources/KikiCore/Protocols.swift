@@ -49,6 +49,51 @@ public protocol LenientTranscribing: AnyObject {
     func transcribeLenient(_ samples: [Float]) async throws -> String
 }
 
+/// Un segmento transcrito con su tiempo de fin (segundos, relativo al inicio
+/// del buffer). Base del modelo confirmado/no-confirmado del streaming.
+public struct LiveSegment: Sendable, Equatable {
+    public let text: String
+    public let end: Double
+    public init(text: String, end: Double) {
+        self.text = text
+        self.end = end
+    }
+}
+
+/// Resultado de un pase de streaming: los segmentos decodificados desde
+/// `clipFromSeconds` y el idioma (detectado o reutilizado) de ese pase.
+public struct LivePassResult: Sendable {
+    public let segments: [LiveSegment]
+    public let language: String
+    public init(segments: [LiveSegment], language: String) {
+        self.segments = segments
+        self.language = language
+    }
+}
+
+/// Transcripción en STREAMING (Paso 2, 2026-07-17). Re-transcribe el buffer
+/// creciente pero solo decodifica desde `clipFromSeconds` (via `clipTimestamps`
+/// de WhisperKit → rápido, no rehace todo), y emite texto incremental por
+/// `onProgress` token-a-token DURANTE la decodificación (el "aparece mientras
+/// hablas"). Es Whisper puro; el pase final autoritativo sigue siendo
+/// `Transcribing.transcribe`. Optional: los conformers que no lo implementen
+/// (mocks de test) hacen que el coordinator caiga a su camino por-ventana.
+public protocol StreamingTranscribing: AnyObject {
+    /// - Parameters:
+    ///   - samples: buffer COMPLETO acumulado hasta ahora.
+    ///   - clipFromSeconds: solo se decodifica el audio a partir de aquí
+    ///     (último segmento confirmado). 0 = desde el inicio.
+    ///   - language: idioma BLOQUEADO ("es"/"en"); `nil` = detectar en este
+    ///     pase y devolverlo en `LivePassResult.language` para bloquearlo.
+    ///   - onProgress: texto parcial acumulado del tramo en decodificación.
+    func streamingPass(
+        _ samples: [Float],
+        clipFromSeconds: Double,
+        language: String?,
+        onProgress: @escaping @Sendable (String) -> Void
+    ) async throws -> LivePassResult
+}
+
 public protocol TextInserting: AnyObject {
     func insert(_ text: String) throws
 }

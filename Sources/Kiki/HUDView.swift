@@ -9,8 +9,11 @@ final class HUDModel: ObservableObject {
     /// (mismo texto que se pega), mostrado un instante con fade.
     @Published var transientText: String?
     @Published var translating: Bool = false
-    /// Preview en vivo (Paso 2, Apple Speech). Aún nil hasta integrarlo.
+    /// Texto en vivo (streaming Whisper) mientras hablas. nil/"" = sin texto aún.
     @Published var liveText: String?
+    /// El resultado excede la altura máxima → hay scroll interno (muestra la
+    /// flecha de pista). Lo fija `HUDController` al medir el texto.
+    @Published var resultScrollable: Bool = false
 }
 
 /// HUD de dictado — píldora premium (puerto del mockup aprobado 2026-07-17):
@@ -36,6 +39,11 @@ struct HUDView: View {
     ]
     private var accent: Color { Color(hex: 0xA78BFA) }
     private var pink: Color { Color(hex: 0xEC6EAD) }
+
+    /// Forma de la nube: rectángulo redondeado (no cápsula). En las píldoras
+    /// compactas (~50px) el radio 24 se ve casi pill; en la nube ALTA (resultado
+    /// o texto en vivo de varias líneas) evita los semicírculos gigantes feos.
+    private var pillShape: RoundedRectangle { RoundedRectangle(cornerRadius: 24, style: .continuous) }
 
     private var stateKey: String {
         if model.transientText != nil { return "transient" }
@@ -64,20 +72,26 @@ struct HUDView: View {
     @ViewBuilder
     private var content: some View {
         if let transientText = model.transientText {
-            resultRow(transientText)
+            resultRow(transientText, scrollable: model.resultScrollable)
                 .transition(.opacity.combined(with: .scale(scale: 0.97)))
         } else if model.state == .recording {
             Group {
                 if let live = model.liveText, !live.isEmpty {
-                    liveRow(live)          // Paso 2: texto en vivo (Apple Speech)
+                    liveRow(live)          // Paso 2: texto en vivo (streaming Whisper)
                 } else {
                     waveform               // aún sin palabras → onda reactiva
                 }
             }
             .transition(.opacity.combined(with: .scale(scale: 0.97)))
         } else if model.state == .processing {
-            // el contorno + interior hacen todo; sin contenido central
-            Color.clear.frame(height: 30).transition(.opacity)
+            // Flujo continuo: si ya hay texto en vivo, se QUEDA visible mientras
+            // el contorno gira (finalizando) — sin parpadear a vacío. Si no hay
+            // texto (modo onda), solo el contorno.
+            if let live = model.liveText, !live.isEmpty {
+                liveRow(live, showDot: false).transition(.opacity)
+            } else {
+                Color.clear.frame(height: 30).transition(.opacity)
+            }
         } else if model.armed {
             wakeRow.transition(.opacity.combined(with: .scale(scale: 0.97)))
         } else {
@@ -131,11 +145,13 @@ struct HUDView: View {
     /// Muestra el parcial en vivo mientras hablas, con auto-scroll al final para
     /// que las últimas palabras siempre estén a la vista. La nube crece hasta un
     /// máximo (ver `HUDController`) y, pasado eso, hace scroll interno.
-    private func liveRow(_ text: String) -> some View {
+    /// `showDot`: el punto que respira (grabando). En finalización (procesando)
+    /// se oculta — el contorno girando ya indica actividad.
+    private func liveRow(_ text: String, showDot: Bool = true) -> some View {
         ScrollViewReader { proxy in
             ScrollView(.vertical, showsIndicators: false) {
                 HStack(alignment: .top, spacing: 10) {
-                    pulseDot
+                    if showDot { pulseDot }
                     Text(text)
                         .font(.system(size: 14, weight: .medium))
                         .fixedSize(horizontal: false, vertical: true)
@@ -157,9 +173,11 @@ struct HUDView: View {
 
     /// Resultado final: texto completo (sin truncar). La altura de la nube la
     /// calcula `HUDController` para que crezca hasta caber; si excede el máximo,
-    /// este `ScrollView` habilita scroll interno.
-    private func resultRow(_ text: String) -> some View {
-        ScrollView(.vertical, showsIndicators: true) {
+    /// hace scroll interno. La barra del sistema se oculta y, cuando hay más
+    /// texto del que cabe (`scrollable`), aparece una flecha ⌄ que se desvanece
+    /// para indicar que se puede desplazar.
+    private func resultRow(_ text: String, scrollable: Bool) -> some View {
+        ScrollView(.vertical) {
             HStack(alignment: .top, spacing: 11) {
                 Image(systemName: "checkmark.circle.fill")
                     .font(.system(size: 17))
@@ -171,7 +189,30 @@ struct HUDView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
+        .scrollIndicators(.hidden)
         .frame(maxHeight: .infinity)
+        .overlay(alignment: .bottom) {
+            if scrollable { scrollHint }
+        }
+    }
+
+    /// Pista de scroll: degradado de desvanecido + flecha ⌄ que late suave.
+    private var scrollHint: some View {
+        TimelineView(.animation) { timeline in
+            let p = sin(timeline.date.timeIntervalSinceReferenceDate * 2.2) * 0.5 + 0.5
+            Image(systemName: "chevron.down")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.35 + 0.4 * p))
+                .padding(.bottom, 2)
+                .frame(maxWidth: .infinity)
+                .background(
+                    LinearGradient(colors: [.clear, .black.opacity(0.28)],
+                        startPoint: .top, endPoint: .bottom)
+                        .frame(height: 26)
+                        .allowsHitTesting(false))
+        }
+        .frame(height: 26)
+        .allowsHitTesting(false)
     }
 
     // MARK: - Manos libres
@@ -210,7 +251,7 @@ struct HUDView: View {
         let start = a - a.rounded(.down)          // parte fraccionaria [0,1)
         let end = start + (b - a)
         let style = StrokeStyle(lineWidth: lineWidth, lineCap: .round)
-        let shape = Capsule().inset(by: lineWidth / 2 + 0.5)
+        let shape = pillShape.inset(by: lineWidth / 2 + 0.5)
         if end <= 1 {
             shape.trim(from: start, to: end).stroke(color, style: style)
         } else {
@@ -250,8 +291,8 @@ struct HUDView: View {
                 ringArc(from: comet, to: comet + 0.05, color: .white, lineWidth: 1.2)
                     .opacity(0.95)
             }
-            // Clip a la cápsula → el glow NUNCA se derrama fuera del contorno.
-            .clipShape(Capsule())
+            // Clip a la forma → el glow NUNCA se derrama fuera del contorno.
+            .clipShape(pillShape)
             .opacity(isProcessing ? 1 : 0)
             .animation(.easeInOut(duration: 0.35), value: isProcessing)
         }
@@ -265,26 +306,26 @@ struct HUDView: View {
             glass
             TimelineView(.animation) { timeline in
                 let deg = timeline.date.timeIntervalSinceReferenceDate * 80
-                Capsule()
+                pillShape
                     .fill(conic(deg))
                     .blur(radius: 24)
                     .opacity(isProcessing ? 0.42 : 0)
                     .animation(.easeInOut(duration: 0.4), value: isProcessing)
             }
-            .clipShape(Capsule())
+            .clipShape(pillShape)
         }
     }
 
     private var glass: some View {
-        Capsule()
+        pillShape
             .fill(.ultraThinMaterial)
-            .overlay(Capsule().fill(LinearGradient(
+            .overlay(pillShape.fill(LinearGradient(
                 colors: [Color(hex: 0x221F30).opacity(0.55), Color(hex: 0x0C0B11).opacity(0.66)],
                 startPoint: .top, endPoint: .bottom)))
-            .overlay(Capsule().fill(RadialGradient(
+            .overlay(pillShape.fill(RadialGradient(
                 colors: [accent.opacity(0.15), .clear],
                 center: .init(x: 0.2, y: 0.0), startRadius: 0, endRadius: 220)))
-            .overlay(Capsule().strokeBorder(LinearGradient(
+            .overlay(pillShape.strokeBorder(LinearGradient(
                 colors: [Color.white.opacity(0.28), Color.white.opacity(0.07)],
                 startPoint: .top, endPoint: .bottom), lineWidth: 1))
     }

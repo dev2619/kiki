@@ -238,32 +238,15 @@ final class SettingsViewModel: ObservableObject {
     /// ko/ms→es y contaminaba el idioma del dictado). En modo batch (off) el
     /// único pase corre sobre el buffer COMPLETO → detección de idioma
     /// fiable. El toggle sigue disponible para quien quiera el streaming.
+    /// Streaming de Whisper en tiempo real (Paso 2, 2026-07-17): muestra el
+    /// texto en la nube MIENTRAS hablas, con la calidad de Whisper (no Apple
+    /// Speech). Default ON. Reactivado tras la reescritura del
+    /// `LiveTranscriptionCoordinator` con idioma bloqueado + `clipTimestamps` +
+    /// progreso token-a-token, que resuelve el bug de idioma del diseño previo.
     nonisolated static func effectiveLiveTranscription() -> Bool {
         let defaults = UserDefaults.standard
         return defaults.object(forKey: liveTranscriptionDefaultsKey) != nil
             ? defaults.bool(forKey: liveTranscriptionDefaultsKey)
-            : false
-    }
-
-    /// Preview en vivo con Apple Speech (Paso 2, 2026-07-17): muestra el texto
-    /// en la nube MIENTRAS hablas (on-device, palabra a palabra). Es display-
-    /// only — el pase final e insertado lo hace Whisper en batch. Sustituye al
-    /// streaming de Whisper (`liveTranscription`, que quedó off por el bug de
-    /// idioma) como el mecanismo de "ver lo que digo". Default ON.
-    @Published var appleLivePreviewEnabled: Bool {
-        didSet {
-            UserDefaults.standard.set(appleLivePreviewEnabled, forKey: Self.appleLivePreviewDefaultsKey)
-        }
-    }
-
-    nonisolated static let appleLivePreviewDefaultsKey = "kiki.appleLivePreview"
-
-    /// Lectura ausente→`true` de `kiki.appleLivePreview`. `nonisolated` para
-    /// leerla desde `AppDelegate` sin depender de la instancia ni de MainActor.
-    nonisolated static func effectiveAppleLivePreview() -> Bool {
-        let defaults = UserDefaults.standard
-        return defaults.object(forKey: appleLivePreviewDefaultsKey) != nil
-            ? defaults.bool(forKey: appleLivePreviewDefaultsKey)
             : true
     }
 
@@ -450,7 +433,6 @@ final class SettingsViewModel: ObservableObject {
             ? defaults.bool(forKey: Self.alwaysListeningDefaultsKey)
             : true
         self.liveTranscriptionEnabled = Self.effectiveLiveTranscription()
-        self.appleLivePreviewEnabled = Self.effectiveAppleLivePreview()
         // Migrar el toggle viejo ANTES de leer las keys nuevas (ver
         // `migrateRestoreClipboardIfNeeded`).
         Self.migrateRestoreClipboardIfNeeded()

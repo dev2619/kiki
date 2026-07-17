@@ -24,7 +24,7 @@ import WhisperKit
 /// variable de encadenado — la exclusión mutua real de las inferencias viene
 /// de que cada eslabón espera al anterior, no del actor en sí (un actor por
 /// sí solo permite reentrancia en sus puntos de `await`).
-public actor WhisperTranscriber: Transcribing, LanguageDetecting, LenientTranscribing {
+public actor WhisperTranscriber: Transcribing, LanguageDetecting, LenientTranscribing, StreamingTranscribing {
     /// Identificador de modelo resuelto contra el repo HF `argmaxinc/whisperkit-coreml`
     /// (WhisperKit hace glob-match del `model:` contra las carpetas del repo;
     /// comportamiento verificado en 1.0.0, ver nota de versión en `Package.swift`).
@@ -472,6 +472,58 @@ public actor WhisperTranscriber: Transcribing, LanguageDetecting, LenientTranscr
     /// que devuelve NUNCA se inserta.
     public func transcribeLenient(_ samples: [Float]) async throws -> String {
         try await enqueue(samples, applyGates: false, knownLanguage: nil)
+    }
+
+    /// Conformidad a `StreamingTranscribing` (Paso 2, 2026-07-17). Pase de
+    /// streaming: decodifica solo desde `clipFromSeconds` (via `clipTimestamps`)
+    /// y emite texto incremental por `onProgress`. Es display-only (sin gates);
+    /// el pase final autoritativo sigue siendo `transcribe`. Espera cualquier
+    /// transcripción estricta en vuelo (el `LiveTranscriptionCoordinator` ya
+    /// serializa los pases de streaming entre sí y contra `finish`).
+    public func streamingPass(
+        _ samples: [Float],
+        clipFromSeconds: Double,
+        language: String?,
+        onProgress: @escaping @Sendable (String) -> Void
+    ) async throws -> LivePassResult {
+        _ = try? await activeTranscription?.value
+        guard let whisperKit else {
+            throw DictationError.transcriptionFailed("el modelo todavía no está cargado")
+        }
+        var options = DecodingOptions()
+        options.task = .transcribe
+        if clipFromSeconds > 0 {
+            options.clipTimestamps = [Float(clipFromSeconds)]
+        }
+        let lockedLanguage: String?
+        if let language {
+            let normalized = language == "en" ? "en" : "es"
+            lockedLanguage = normalized
+            options.language = normalized
+            options.detectLanguage = false
+        } else {
+            lockedLanguage = nil
+            options.detectLanguage = true   // detecta en este pase (se bloquea luego)
+        }
+        if let promptTokens = dictionaryPromptTokens(kit: whisperKit, language: lockedLanguage ?? "es") {
+            options.promptTokens = promptTokens
+        }
+        let callback: TranscriptionCallback = { progress in
+            onProgress(progress.text)
+            return nil   // continuar decodificando
+        }
+        let results = try await whisperKit.transcribe(audioArray: samples, decodeOptions: options, callback: callback)
+        let segments = results.flatMap(\.segments).map { LiveSegment(text: $0.text, end: Double($0.end)) }
+        let detected: String
+        if let lockedLanguage {
+            detected = lockedLanguage
+        } else if let lang = results.first?.language {
+            detected = lang == "en" ? "en" : "es"
+        } else {
+            detected = "es"
+        }
+        lastDetectedLanguage = detected
+        return LivePassResult(segments: segments, language: detected)
     }
 
     /// Encola `samples` detrás de cualquier transcripción en vuelo (misma

@@ -14,11 +14,6 @@ public final class AudioRecorder: AudioRecording {
     /// Muestras 16kHz mono del chunk recién resampleado. Se invoca en un hilo de audio en tiempo real — no bloquear.
     public var onChunk: (([Float]) -> Void)?
 
-    /// Buffer NATIVO del micrófono (formato del input, sin resamplear), para
-    /// alimentar `SFSpeechRecognizer` (preview en vivo de Apple Speech). Se
-    /// invoca en un hilo de audio en tiempo real — no bloquear.
-    public var onBuffer: ((AVAudioPCMBuffer) -> Void)?
-
     public init() {}
 
     public func start() throws {
@@ -31,7 +26,6 @@ public final class AudioRecorder: AudioRecording {
             self.collectQueue.async { self.collected.append(contentsOf: chunk) }
             self.onLevel?(AudioResampler.rms(chunk))
             self.onChunk?(chunk)
-            self.onBuffer?(buffer)
         }
         engine.prepare()
         do {

@@ -188,9 +188,9 @@ private struct GeneralSectionView: View {
             }
 
             Section {
-                Toggle("Ver texto en vivo mientras hablas", isOn: $viewModel.appleLivePreviewEnabled)
+                Toggle("Ver texto en vivo mientras hablas", isOn: $viewModel.liveTranscriptionEnabled)
             } footer: {
-                Text("Activado (por defecto), la nube muestra lo que vas diciendo en tiempo real con el reconocimiento de voz de Apple, 100% en tu Mac. El texto final que se inserta lo produce Whisper (más preciso), así que el refinado, la traducción y el idioma siguen funcionando igual. Desactívalo para ver solo la onda de sonido mientras dictas.")
+                Text("Activado (por defecto), la nube muestra lo que vas diciendo en tiempo real con la calidad de Whisper (100% en tu Mac): el texto va apareciendo mientras hablas y al soltar Fn se finaliza y pega. Va ~medio segundo detrás de tu voz y las últimas palabras pueden reajustarse al llegar más contexto. Desactívalo para ver solo la onda de sonido mientras dictas.")
             }
 
             Section {

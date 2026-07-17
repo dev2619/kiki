@@ -67,13 +67,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private(set) var controller: DictationController!
     let recorder = AudioRecorder()
-    /// Paso 2 (2026-07-17): preview en vivo con Apple Speech (on-device),
-    /// display-only, para el flujo por hotkey. Alimentado por `recorder.onBuffer`
-    /// y arrancado/parado según el estado en `dictationStateDidChange`. Whisper
-    /// sigue siendo la única autoridad del texto insertado (pase final batch).
-    private let applePreview = ApplePreviewRecognizer()
-    /// Evita `applePreview.stop()` redundante al pasar por varios estados.
-    private var applePreviewActive = false
     /// F3 Task 2: construido con la preferencia efectiva del usuario (cae al
     /// modelo base si no hay preferencia guardada o si quedó inválida — ver
     /// `ModelPreference.effectiveModelId`), no con `WhisperTranscriber.preferredModel`
@@ -167,11 +160,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         Permissions.requestMicrophoneAccess()
         Permissions.ensureAccessibility()
-        // Paso 2: autorización del reconocimiento de voz de Apple (on-device)
-        // para el preview en vivo. Si el usuario la deniega, el preview
-        // simplemente no arranca y el HUD cae a la onda — sin afectar el
-        // dictado (Whisper).
-        ApplePreviewRecognizer.requestAuthorization { _ in }
 
         settingsViewModel = SettingsViewModel(
             dictionaryAdapter: dictionaryAdapter,
@@ -269,16 +257,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // `DictationController.liveCoordinatorFactory`.
             liveCoordinatorFactory: { [weak self] in
                 guard let self else { return nil }
-                // Intervalos más ágiles que el default (0.8s/0.4s) para que
-                // la nube se sienta en TIEMPO REAL: parciales ~2× más
-                // frecuentes. El modelo 954MB transcribe en 0.2-0.7s (ver
-                // kiki.log), así que un pase cada 0.45s no se solapa ni se
-                // atrasa en utterances normales.
+                // Streaming de Whisper (Paso 2, 2026-07-17): pases ágiles con
+                // `clipTimestamps` (solo decodifica el tramo nuevo) + progreso
+                // token-a-token, así la nube se siente en TIEMPO REAL. El idioma
+                // se fija con el selector (Auto = detectar una vez y bloquear).
                 return LiveTranscriptionCoordinator(
                     transcriber: self.transcriber,
-                    minPassInterval: 0.45,
-                    minNewAudioSeconds: 0.25,
-                    maxLivePassSeconds: 6.0)
+                    forcedLanguage: SettingsViewModel.effectiveDictationLanguage(),
+                    minPassInterval: 0.5,
+                    minNewAudioSeconds: 0.35)
             })
         controller.delegate = self
 
@@ -310,19 +297,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // tiempo real, nunca debe bloquear.
         recorder.onChunk = { [weak self] chunk in
             Task { @MainActor in self?.controller.liveChunk(chunk) }
-        }
-        // Paso 2: teo del buffer nativo al preview de Apple Speech. Corre en el
-        // hilo de audio en tiempo real; `append` está diseñado para eso (no
-        // salta a MainActor). El preview solo tiene una request activa mientras
-        // `applePreviewActive` (ver `dictationStateDidChange`), fuera de eso
-        // `append` es no-op (request == nil).
-        recorder.onBuffer = { [weak self] buffer in
-            self?.applePreview.append(buffer)
-        }
-        // El parcial en vivo (ya en MainActor vía DispatchQueue.main) va directo
-        // a la burbuja del HUD.
-        applePreview.onPartial = { [weak self] text in
-            self?.hud.updateLiveText(text)
         }
 
         setUpStatusItem()
@@ -711,9 +685,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // parciales en tiempo real.
         let coordinator = LiveTranscriptionCoordinator(
             transcriber: transcriber,
-            minPassInterval: 0.45,
-            minNewAudioSeconds: 0.25,
-            maxLivePassSeconds: 6.0)
+            forcedLanguage: SettingsViewModel.effectiveDictationLanguage(),
+            minPassInterval: 0.5,
+            minNewAudioSeconds: 0.35)
         coordinator.onPartial = { [weak self] text in self?.hud.updateLiveText(text) }
         coordinator.start()
         coordinator.append(chunk)
@@ -886,17 +860,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 }
 
 extension AppDelegate: DictationControllerDelegate {
-    /// Locale para el preview de Apple Speech, según el idioma del dictado
-    /// (Auto/ES/EN). En Auto usa el del sistema — Apple Speech necesita UN
-    /// idioma por sesión; el pase final de Whisper sí autodetecta.
-    private func previewLocale() -> Locale {
-        switch SettingsViewModel.effectiveDictationLanguage() {
-        case "es": return Locale(identifier: "es-ES")
-        case "en": return Locale(identifier: "en-US")
-        default: return Locale.current
-        }
-    }
-
     func dictationStateDidChange(_ state: DictationState) {
         // Fase: fidelidad de idioma / Fix 2. Se fija ANTES de `hud.show`
         // (que es lo que efectivamente pone la pill en pantalla) para que la
@@ -908,25 +871,6 @@ extension AppDelegate: DictationControllerDelegate {
             hud.setTranslating(settingsViewModel.translateEnabled)
         }
         hud.show(state: state)
-
-        // Paso 2: preview en vivo con Apple Speech (on-device). Solo el flujo
-        // por HOTKEY entra en `.recording` (manos-libres va directo a
-        // `.processing`), así que el preview es exclusivo de la tecla Fn. Al
-        // salir de grabación se detiene y Whisper toma el pase final; la última
-        // burbuja se mantiene hasta que `show(.idle)` la limpia.
-        switch state {
-        case .recording:
-            if SettingsViewModel.effectiveAppleLivePreview() {
-                hud.updateLiveText(nil)
-                applePreview.start(locale: previewLocale())
-                applePreviewActive = true
-            }
-        case .processing, .idle:
-            if applePreviewActive {
-                applePreview.stop()
-                applePreviewActive = false
-            }
-        }
 
         // Belt-and-suspenders contra `resumeAsArmed` stale: `.recording`
         // SOLO puede originarse en el hotkey — el flujo manos-libres

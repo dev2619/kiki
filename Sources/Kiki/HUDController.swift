@@ -96,6 +96,11 @@ final class HUDController {
 
     func show(state: DictationState) {
         model.state = state
+        // Fuera de un resultado transitorio, la nube vuelve a ignorar el ratón
+        // (no roba clics ni scroll a la app donde dictas).
+        if model.transientText == nil {
+            panel.ignoresMouseEvents = true
+        }
         // Defensa: un caller que llegue a idle sin updateLiveText(nil) no debe
         // filtrar el texto de la sesión anterior a la próxima burbuja.
         if case .idle = state {
@@ -165,8 +170,15 @@ final class HUDController {
     /// "respeta el estado armado" sin duplicar esa lógica aquí.
     func showTransient(_ text: String) {
         model.transientText = text
-        pendingResultSize = Self.computeResultSize(for: text)
+        let (size, scrollable) = Self.computeResultSize(for: text)
+        pendingResultSize = size
+        model.resultScrollable = scrollable
         resultHovered = false
+        // Habilita la rueda del ratón para poder hacer scroll dentro de la nube
+        // de resultado (con `ignoresMouseEvents = true` los eventos de scroll no
+        // llegaban al ScrollView). Se restaura a `true` al ocultar / cambiar de
+        // estado. El hover-para-persistir sigue por sondeo de posición.
+        panel.ignoresMouseEvents = false
         applyLayout(animated: true)
         panel.orderFrontRegardless()
         startHoverPolling()
@@ -182,6 +194,7 @@ final class HUDController {
             try? await Task.sleep(nanoseconds: delay)
             guard let self, generation == self.transientGeneration else { return }
             self.resultHovered = false
+            self.panel.ignoresMouseEvents = true
             self.model.transientText = nil
             self.show(state: self.model.state)
         }
@@ -201,8 +214,9 @@ final class HUDController {
     }
 
     /// Mide el alto necesario para el texto del resultado (ancho fijo), acotado
-    /// entre el mínimo y el máximo; más allá del máximo, hay scroll interno.
-    private static func computeResultSize(for text: String) -> NSSize {
+    /// entre el mínimo y el máximo. Devuelve además `scrollable` = el texto
+    /// excede el máximo (hay scroll interno → se muestra la flecha de pista).
+    private static func computeResultSize(for text: String) -> (size: NSSize, scrollable: Bool) {
         let font = NSFont.systemFont(ofSize: 14, weight: .medium)
         let horizontalPadding: CGFloat = 22 * 2   // .padding(.horizontal, 22)
         let iconColumn: CGFloat = 17 + 11         // ✓ + spacing del HStack
@@ -212,8 +226,9 @@ final class HUDController {
             options: [.usesLineFragmentOrigin, .usesFontLeading],
             attributes: [.font: font])
         let verticalPadding: CGFloat = 12 * 2     // .padding(.vertical, 12)
-        let height = min(max(ceil(bounding.height) + verticalPadding, minResultHeight), maxResultHeight)
-        return NSSize(width: resultWidth, height: height)
+        let needed = ceil(bounding.height) + verticalPadding
+        let height = min(max(needed, minResultHeight), maxResultHeight)
+        return (NSSize(width: resultWidth, height: height), needed > maxResultHeight)
     }
 
     /// Tamaño objetivo según el contenido actual.
@@ -224,7 +239,10 @@ final class HUDController {
             // Con texto en vivo la nube crece para mostrarlo; sin él, píldora
             // compacta de onda.
             return (model.liveText?.isEmpty == false) ? Self.liveSize : Self.recordingSize
-        case .processing: return Self.processingSize
+        case .processing:
+            // Flujo continuo: si el texto en vivo sigue visible al finalizar,
+            // mantiene el tamaño ancho (no encoge y vuelve a crecer).
+            return (model.liveText?.isEmpty == false) ? Self.liveSize : Self.processingSize
         case .idle: return Self.armedSize   // solo visible si `armed`
         }
     }
