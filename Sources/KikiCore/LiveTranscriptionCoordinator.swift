@@ -60,6 +60,19 @@ public final class LiveTranscriptionCoordinator {
     private let transcriber: Transcribing
     private let minPassInterval: TimeInterval
     private let minNewAudioSamples: Int
+    /// Tope de muestras que un pase INTERMEDIO (preview de la nube)
+    /// transcribe: solo la cola más reciente del buffer. `0` = sin tope
+    /// (buffer completo, comportamiento previo). Motivo (fix 2026-07-16,
+    /// dictados largos): re-transcribir el buffer entero en cada pase es
+    /// O(n) y en dictados largos cada pase tarda tanto que la nube se
+    /// congela y `finish()` espera decenas de segundos al pase en vuelo
+    /// (visto en kiki.log: 36s de gap, 44s totales para 19s de audio).
+    /// Acotar los pases intermedios a los últimos ~N s los mantiene rápidos
+    /// SIEMPRE (preview rodante del final, que es lo que se ve al dictar);
+    /// el pase FINAL de `finish()` sigue usando el buffer COMPLETO, así el
+    /// texto insertado nunca se recorta. Dictados cortos (< N s) no cambian:
+    /// la cola ES todo el buffer.
+    private let maxLivePassSamples: Int
     private let now: () -> Date
 
     /// Buffer completo de audio acumulado desde `append`. Cada pase captura
@@ -115,12 +128,14 @@ public final class LiveTranscriptionCoordinator {
         transcriber: Transcribing,
         minPassInterval: TimeInterval = 0.8,
         minNewAudioSeconds: Double = 0.4,
+        maxLivePassSeconds: Double = 8.0,
         sampleRate: Double = 16_000,
         now: @escaping () -> Date = Date.init
     ) {
         self.transcriber = transcriber
         self.minPassInterval = minPassInterval
         self.minNewAudioSamples = Int(minNewAudioSeconds * sampleRate)
+        self.maxLivePassSamples = maxLivePassSeconds > 0 ? Int(maxLivePassSeconds * sampleRate) : 0
         self.now = now
     }
 
@@ -160,6 +175,13 @@ public final class LiveTranscriptionCoordinator {
         guard capturedGeneration == generation else { return "" }
         isFinished = true
         let samples = fullAudio ?? buffer
+        // El pase final SIEMPRE detecta el idioma sobre el buffer COMPLETO.
+        // (Se intentó reutilizar el idioma de los pases intermedios —P1a—
+        // para ahorrar una inferencia, pero esos pases corren sobre audio
+        // corto/ventaneado donde Whisper detecta basura, p.ej. ko/ms→es, y
+        // contaminaba el idioma: dictados en inglés salían forzados a español.
+        // La detección sobre el buffer completo es fiable. Ver kiki.log
+        // 2026-07-16.)
         KikiLog.log("kiki live: pase final (\(samples.count) muestras)")
         do {
             let text = try await transcriber.transcribe(samples)
@@ -195,8 +217,18 @@ public final class LiveTranscriptionCoordinator {
     }
 
     private func launchPass() {
-        let samples = buffer
-        sampleCountAtLastPassStart = samples.count
+        // Un pase intermedio (preview) transcribe solo la cola reciente
+        // (`maxLivePassSamples`) para no volverse O(n) en dictados largos —
+        // ver doc de `maxLivePassSamples`. `sampleCountAtLastPassStart` se
+        // fija con el tamaño REAL del buffer (no el de la ventana) para que
+        // el gate de "audio nuevo" siga midiendo contra todo lo acumulado.
+        sampleCountAtLastPassStart = buffer.count
+        let samples: [Float]
+        if maxLivePassSamples > 0 && buffer.count > maxLivePassSamples {
+            samples = Array(buffer.suffix(maxLivePassSamples))
+        } else {
+            samples = buffer
+        }
         lastPassStart = now()
         let capturedGeneration = generation
         // Capturado como `let` local ANTES de crear la Task — igual que

@@ -92,6 +92,7 @@ final class SpyDelegate: DictationControllerDelegate {
     var states: [DictationState] = []
     var errors: [DictationError] = []
     var insertCount = 0
+    var insertedText: String?
     var livePartials: [String?] = []
     /// Combined chronological log (Fix 2 bubble-contract regression test):
     /// interleaves insert/live-partial events in call order, so a test can
@@ -101,7 +102,11 @@ final class SpyDelegate: DictationControllerDelegate {
 
     func dictationStateDidChange(_ state: DictationState) { states.append(state) }
     func dictationDidFail(_ error: DictationError) { errors.append(error) }
-    func dictationDidInsert() { insertCount += 1; events.append("insert") }
+    func dictationDidInsert(_ text: String) {
+        insertCount += 1
+        events.append("insert")
+        insertedText = text
+    }
     func dictationLivePartialDidChange(_ text: String?) {
         livePartials.append(text)
         events.append(text.map { "livePartial:\($0)" } ?? "livePartial:nil")

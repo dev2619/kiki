@@ -21,6 +21,25 @@ public protocol AudioRecording: AnyObject {
 
 public protocol Transcribing: AnyObject {
     func transcribe(_ samples: [Float]) async throws -> String
+
+    /// Como `transcribe`, pero cuando `knownLanguage` no es `nil` reutiliza ese
+    /// idioma y OMITE la detección de idioma — que en Whisper es un pase de
+    /// inferencia COMPLETO extra sobre todo el buffer. Lo usa el pase final del
+    /// dictado live (`LiveTranscriptionCoordinator.finish`), donde el idioma ya
+    /// lo fijaron los pases intermedios de la MISMA sesión (el wake está
+    /// detenido durante el dictado por hotkey, así que no hay interferencia).
+    /// Corta ~a la mitad la latencia del "procesando" al soltar. Las gates
+    /// anti-alucinación del pase estricto se mantienen intactas.
+    ///
+    /// Default: ignora el hint (idéntico a `transcribe`) — para mocks de test
+    /// y conformers que no expongan el atajo.
+    func transcribe(_ samples: [Float], knownLanguage: String?) async throws -> String
+}
+
+public extension Transcribing {
+    func transcribe(_ samples: [Float], knownLanguage: String?) async throws -> String {
+        try await transcribe(samples)
+    }
 }
 
 /// Transcripción leniente para parciales de display (F1 fix 2026-07-12):
@@ -42,7 +61,9 @@ public protocol DictationControllerDelegate: AnyObject {
     /// o de refinado/crudo), en ambos modos (hotkey y manos-libres). Default
     /// vacío vía extensión para no romper conformers/tests existentes que no
     /// lo necesitan.
-    func dictationDidInsert()
+    /// - Parameter text: el texto que se insertó (para mostrarlo como
+    ///   confirmación en el HUD — resultado coherente con el portapapeles).
+    func dictationDidInsert(_ text: String)
     /// Parcial en vivo del `LiveTranscriptionCoordinator` activo durante un
     /// dictado live (F1 Task 3). `nil` limpia la burbuja HUD — se entrega así
     /// explícitamente al terminar (`hotkeyReleased`) o cancelar (`cancel()`)
@@ -55,7 +76,7 @@ public protocol DictationControllerDelegate: AnyObject {
 }
 
 extension DictationControllerDelegate {
-    public func dictationDidInsert() {}
+    public func dictationDidInsert(_ text: String) {}
 }
 
 public enum AppProfile: String, Equatable, CaseIterable {

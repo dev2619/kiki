@@ -37,6 +37,12 @@ public final class DictationController {
     private let languageProvider: LanguageDetecting?
     private let translateEnabled: () -> Bool
     private let refineEnabled: () -> Bool
+    /// Idioma FORZADO por el usuario ("es"/"en"), o `nil` = Auto (Whisper
+    /// detecta). Consultado en cada dictado (aplica en caliente). Forzarlo
+    /// salta la detección de idioma (más fiable — la autodetección local
+    /// falla en clips cortos/con acento, ver kiki.log 2026-07-16 — y más
+    /// rápido).
+    private let forcedLanguage: () -> String?
     /// F1 Task 3 (modo live): consultado SOLO en `hotkeyPressed` — la
     /// decisión se captura en `activeLiveSession` para ese dictado completo,
     /// ver doc ahí.
@@ -69,6 +75,7 @@ public final class DictationController {
         languageProvider: LanguageDetecting? = nil,
         translateEnabled: @escaping () -> Bool = { false },
         refineEnabled: @escaping () -> Bool = { true },
+        forcedLanguage: @escaping () -> String? = { nil },
         liveEnabled: @escaping () -> Bool = { false },
         liveCoordinatorFactory: (() -> LiveTranscriptionCoordinator?)? = nil
     ) {
@@ -86,6 +93,7 @@ public final class DictationController {
         self.languageProvider = languageProvider
         self.translateEnabled = translateEnabled
         self.refineEnabled = refineEnabled
+        self.forcedLanguage = forcedLanguage
         self.liveEnabled = liveEnabled
         self.liveCoordinatorFactory = liveCoordinatorFactory
     }
@@ -195,9 +203,18 @@ public final class DictationController {
             let audioSeconds = Double(samples.count) / sampleRate
             KikiLog.log("kiki core: transcribiendo \(samples.count) muestras (\(String(format: "%.1f", audioSeconds))s de audio)")
             let started = Date()
-            let text = try await transcriber.transcribe(samples)
+            // Idioma forzado por el usuario (Auto/ES/EN). Si viene, salta la
+            // detección de Whisper (poco fiable en clips cortos → forzaba
+            // español en dictados en inglés, ver kiki.log) y es más rápido.
+            let forced = forcedLanguage()
+            let text = try await transcriber.transcribe(samples, knownLanguage: forced)
             KikiLog.log("kiki core: transcripción lista en \(String(format: "%.2f", Date().timeIntervalSince(started)))s — \(text.count) chars: \"\(text)\"")
-            let language = await languageProvider?.detectedLanguage() ?? "es"
+            let language: String
+            if let forced {
+                language = forced
+            } else {
+                language = await languageProvider?.detectedLanguage() ?? "es"
+            }
             await processTranscriptContent(text, audioSeconds: audioSeconds, language: language, bypassEnhancement: bypassEnhancement)
         } catch let error as DictationError {
             transition(to: .idle)
@@ -247,7 +264,7 @@ public final class DictationController {
                 if let template = snippets?.expand(trimmed) {
                     try inserter.insert(template)
                     KikiLog.log("kiki core: snippet expandido")
-                    delegate?.dictationDidInsert()
+                    delegate?.dictationDidInsert(template)
                     let profile = context?.currentProfile() ?? .neutral
                     history?.record(HistoryRecord(rawText: trimmed, finalText: template, profile: profile, audioSeconds: audioSeconds))
                     transition(to: .idle)
@@ -258,7 +275,7 @@ public final class DictationController {
                 let final = await refineOrFallback(trimmed, language: language, bypassEnhancement: bypassEnhancement)
                 try inserter.insert(final)
                 KikiLog.log("kiki core: texto insertado")
-                delegate?.dictationDidInsert()
+                delegate?.dictationDidInsert(final)
 
                 // History recording
                 let profile = context?.currentProfile() ?? .neutral

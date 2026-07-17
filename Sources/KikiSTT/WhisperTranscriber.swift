@@ -454,7 +454,14 @@ public actor WhisperTranscriber: Transcribing, LanguageDetecting, LenientTranscr
     }
 
     public func transcribe(_ samples: [Float]) async throws -> String {
-        try await enqueue(samples, applyGates: true)
+        try await enqueue(samples, applyGates: true, knownLanguage: nil)
+    }
+
+    /// Pase estricto que REUTILIZA `knownLanguage` y omite el pase de
+    /// detección de idioma (ver doc del protocolo `Transcribing`). Usado por
+    /// el pase final del dictado live para no pagar dos inferencias completas.
+    public func transcribe(_ samples: [Float], knownLanguage: String?) async throws -> String {
+        try await enqueue(samples, applyGates: true, knownLanguage: knownLanguage)
     }
 
     /// Conformidad a `LenientTranscribing` (F1 fix 2026-07-12): mismo pipeline
@@ -464,7 +471,7 @@ public actor WhisperTranscriber: Transcribing, LanguageDetecting, LenientTranscr
     /// para parciales de display (`LiveTranscriptionCoordinator`); el texto
     /// que devuelve NUNCA se inserta.
     public func transcribeLenient(_ samples: [Float]) async throws -> String {
-        try await enqueue(samples, applyGates: false)
+        try await enqueue(samples, applyGates: false, knownLanguage: nil)
     }
 
     /// Encola `samples` detrás de cualquier transcripción en vuelo (misma
@@ -473,11 +480,11 @@ public actor WhisperTranscriber: Transcribing, LanguageDetecting, LenientTranscr
     /// con `applyGates` indicando si aplican las gates de confianza/
     /// alucinación (`true` para el pase estricto/insertable, `false` para el
     /// leniente de display).
-    private func enqueue(_ samples: [Float], applyGates: Bool) async throws -> String {
+    private func enqueue(_ samples: [Float], applyGates: Bool, knownLanguage: String?) async throws -> String {
         let previous = activeTranscription
         let task = Task {
             _ = try? await previous?.value
-            return try await self.doTranscribe(samples, applyGates: applyGates)
+            return try await self.doTranscribe(samples, applyGates: applyGates, knownLanguage: knownLanguage)
         }
         activeTranscription = task
         return try await task.value
@@ -493,7 +500,7 @@ public actor WhisperTranscriber: Transcribing, LanguageDetecting, LenientTranscr
     ///   protección anti-alucinación; esas mismas gates son justo lo que
     ///   dejaba la burbuja en blanco en dictados cortos (buffers <2s), que son
     ///   la mayoría en campo (F1 fix 2026-07-12).
-    private func doTranscribe(_ samples: [Float], applyGates: Bool) async throws -> String {
+    private func doTranscribe(_ samples: [Float], applyGates: Bool, knownLanguage: String?) async throws -> String {
         // Snapshot local del kit vigente al ENTRAR a esta transcripción. Se
         // reusa (nunca se relee `self.whisperKit`) para toda la duración de
         // `doTranscribe`, incluida la codificación del prompt del diccionario
@@ -516,10 +523,23 @@ public actor WhisperTranscriber: Transcribing, LanguageDetecting, LenientTranscr
         // token muestreado, no una distribución), así que la restricción es:
         // inglés solo si Whisper lo detectó explícitamente; cualquier otra cosa
         // se trata como español (idioma primario del producto en Fase 1).
-        let (detected, _) = try await whisperKit.detectLangauge(audioArray: samples)
-        let language = detected == "en" ? "en" : "es"
-        lastDetectedLanguage = language
-        KikiLog.log("kiki stt: idioma \(language) (whisper detectó \(detected))")
+        // 1a (2026-07-16): si el caller ya conoce el idioma (pase final live —
+        // los pases intermedios de la sesión ya lo detectaron), se OMITE el
+        // `detectLangauge`, que es un pase de inferencia COMPLETO extra sobre
+        // todo el buffer. Corta ~a la mitad la latencia del "procesando". Solo
+        // se normaliza igual que la detección (en/es), manteniendo la
+        // restricción del producto ES/EN.
+        let language: String
+        if let knownLanguage {
+            language = knownLanguage == "en" ? "en" : "es"
+            lastDetectedLanguage = language
+            KikiLog.log("kiki stt: idioma reutilizado \(language) (sin pase de detección extra)")
+        } else {
+            let (detected, _) = try await whisperKit.detectLangauge(audioArray: samples)
+            language = detected == "en" ? "en" : "es"
+            lastDetectedLanguage = language
+            KikiLog.log("kiki stt: idioma \(language) (whisper detectó \(detected))")
+        }
         var options = DecodingOptions()
         options.task = .transcribe
         options.language = language
