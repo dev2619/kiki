@@ -35,6 +35,14 @@ final class HUDController {
     private var transientGeneration = 0
     /// Tamaño calculado para el resultado transitorio en curso (alto dinámico).
     private var pendingResultSize = NSSize(width: 440, height: 58)
+    /// Estado actual del hover sobre la nube de resultado (para no re-disparar).
+    private var resultHovered = false
+    /// Monitores de ratón (global + local). Se comparan contra el frame del
+    /// panel vía `NSEvent.mouseLocation`, así el hover funciona AUNQUE kiki no
+    /// sea la app activa (el usuario dicta en otra app) — `onHover` de SwiftUI
+    /// no dispara sin foco de app. Además el panel sigue ignorando clics.
+    private var globalMouseMonitor: Any?
+    private var localMouseMonitor: Any?
 
     init() {
         panel = NSPanel(
@@ -54,20 +62,38 @@ final class HUDController {
         panel.ignoresMouseEvents = true
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         panel.contentView = NSHostingView(rootView: HUDView(model: model))
-        // Hover-para-persistir: la nube de resultado avisa cuándo el cursor
-        // entra/sale para pausar o reanudar el auto-ocultado.
-        model.onHoverChange = { [weak self] hovering in
-            self?.handleResultHover(hovering)
+        // Hover-para-persistir: seguimos la posición del cursor globalmente y
+        // la comparamos con el frame del panel (ver `checkHover`).
+        globalMouseMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.mouseMoved]) { [weak self] _ in
+            self?.checkHover()
         }
+        localMouseMonitor = NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved]) { [weak self] event in
+            self?.checkHover()
+            return event
+        }
+    }
+
+    deinit {
+        if let m = globalMouseMonitor { NSEvent.removeMonitor(m) }
+        if let m = localMouseMonitor { NSEvent.removeMonitor(m) }
+    }
+
+    /// Compara la posición del cursor con el frame del panel y traduce el
+    /// entrar/salir en hover-para-persistir. Solo relevante mientras hay un
+    /// resultado transitorio visible.
+    private func checkHover() {
+        guard model.transientText != nil else {
+            resultHovered = false
+            return
+        }
+        let inside = panel.frame.contains(NSEvent.mouseLocation)
+        guard inside != resultHovered else { return }
+        resultHovered = inside
+        handleResultHover(inside)
     }
 
     func show(state: DictationState) {
         model.state = state
-        // Fuera del resultado transitorio, la nube vuelve a ignorar el ratón
-        // (no roba clics a la app donde el usuario dicta).
-        if model.transientText == nil {
-            panel.ignoresMouseEvents = true
-        }
         // Defensa: un caller que llegue a idle sin updateLiveText(nil) no debe
         // filtrar el texto de la sesión anterior a la próxima burbuja.
         if case .idle = state {
@@ -128,9 +154,7 @@ final class HUDController {
     func showTransient(_ text: String) {
         model.transientText = text
         pendingResultSize = Self.computeResultSize(for: text)
-        // Habilitar eventos de ratón para detectar hover-para-persistir. Fuera
-        // del resultado se restaura a `true` en `show(state:)`.
-        panel.ignoresMouseEvents = false
+        resultHovered = false
         applyLayout(animated: true)
         panel.orderFrontRegardless()
         scheduleTransientDismiss(delay: Self.transientDuration)
@@ -144,8 +168,8 @@ final class HUDController {
         Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: delay)
             guard let self, generation == self.transientGeneration else { return }
+            self.resultHovered = false
             self.model.transientText = nil
-            self.panel.ignoresMouseEvents = true
             self.show(state: self.model.state)
         }
     }

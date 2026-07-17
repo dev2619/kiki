@@ -11,10 +11,6 @@ final class HUDModel: ObservableObject {
     @Published var translating: Bool = false
     /// Preview en vivo (Paso 2, Apple Speech). Aún nil hasta integrarlo.
     @Published var liveText: String?
-    /// Reporta al `HUDController` cuándo el cursor entra/sale de la nube de
-    /// resultado, para pausar el auto-ocultado mientras el usuario la enfoca
-    /// (hover-para-persistir). No es @Published: es un callback puro.
-    var onHoverChange: ((Bool) -> Void)?
 }
 
 /// HUD de dictado — píldora premium (puerto del mockup aprobado 2026-07-17):
@@ -26,9 +22,11 @@ final class HUDModel: ObservableObject {
 struct HUDView: View {
     @ObservedObject var model: HUDModel
 
+    // Recorren TODO el contorno; hues bien repartidos para que hasta los
+    // lados largos de la píldora muestren variación (no un solo color).
     private let colors: [Color] = [
-        Color(hex: 0x7C5CFF), Color(hex: 0xEC6EAD),
-        Color(hex: 0x38BDF8), Color(hex: 0x34D399), Color(hex: 0x7C5CFF),
+        Color(hex: 0x7C5CFF), Color(hex: 0x38BDF8), Color(hex: 0x34D399),
+        Color(hex: 0xEC6EAD), Color(hex: 0xA78BFA), Color(hex: 0x7C5CFF),
     ]
     private var accent: Color { Color(hex: 0xA78BFA) }
     private var pink: Color { Color(hex: 0xEC6EAD) }
@@ -61,7 +59,6 @@ struct HUDView: View {
     private var content: some View {
         if let transientText = model.transientText {
             resultRow(transientText)
-                .onHover { model.onHoverChange?($0) }
                 .transition(.opacity.combined(with: .scale(scale: 0.97)))
         } else if model.state == .recording {
             waveform.transition(.opacity.combined(with: .scale(scale: 0.97)))
@@ -155,11 +152,16 @@ struct HUDView: View {
     @ViewBuilder
     private var edgeGlow: some View {
         TimelineView(.animation) { timeline in
-            let deg = timeline.date.timeIntervalSinceReferenceDate * 106  // ~3.4s/vuelta
+            let deg = timeline.date.timeIntervalSinceReferenceDate * 100  // ~3.6s/vuelta
             ZStack {
-                Capsule().strokeBorder(conic(deg), lineWidth: 3.5).blur(radius: 3.5).opacity(0.55) // bloom
-                Capsule().strokeBorder(conic(deg), lineWidth: 2)                                    // trazo nítido
+                // Neón: brillo difuso que se queda DENTRO del contorno.
+                Capsule().strokeBorder(conic(deg), lineWidth: 6).blur(radius: 6)
+                // Trazo nítido justo sobre el borde.
+                Capsule().strokeBorder(conic(deg), lineWidth: 1.6)
             }
+            // Clip a la cápsula → el glow NUNCA se derrama fuera del contorno
+            // (antes el blur lo recortaba el marco rectangular del panel).
+            .clipShape(Capsule())
             .opacity(isProcessing ? 1 : 0)
             .animation(.easeInOut(duration: 0.35), value: isProcessing)
         }
