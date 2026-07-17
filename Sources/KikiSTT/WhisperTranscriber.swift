@@ -248,6 +248,17 @@ public actor WhisperTranscriber: Transcribing, LanguageDetecting, LenientTranscr
         self.modelName = model
     }
 
+    /// Quita los tokens especiales de Whisper (`<|startoftranscript|>`,
+    /// `<|es|>`, `<|transcribe|>`, `<|0.00|>`, `<|endoftext|>`…) del texto CRUDO
+    /// de la decodificación en streaming, que los incluye. El pase batch normal
+    /// ya devuelve texto limpio; esto es para el callback de progreso y los
+    /// segmentos del `streamingPass`. Función pura → testeable.
+    static func stripSpecialTokens(_ text: String) -> String {
+        text.replacingOccurrences(of: "<\\|[^|]*\\|>", with: "", options: .regularExpression)
+            .replacingOccurrences(of: "  ", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     /// Modelo whisperkit-coreml actualmente activo (el que sirve
     /// `transcribe`), tras la última carga o conmutación exitosa.
     public var currentModel: String { modelName }
@@ -509,11 +520,16 @@ public actor WhisperTranscriber: Transcribing, LanguageDetecting, LenientTranscr
             options.promptTokens = promptTokens
         }
         let callback: TranscriptionCallback = { progress in
-            onProgress(progress.text)
+            // El texto de progreso es la decodificación CRUDA e incluye tokens
+            // especiales de Whisper (`<|1.48|>`, `<|transcribe|>`,
+            // `<|endoftext|>`…) — se limpian antes de mostrarse en la nube.
+            onProgress(Self.stripSpecialTokens(progress.text))
             return nil   // continuar decodificando
         }
         let results = try await whisperKit.transcribe(audioArray: samples, decodeOptions: options, callback: callback)
-        let segments = results.flatMap(\.segments).map { LiveSegment(text: $0.text, end: Double($0.end)) }
+        let segments = results.flatMap(\.segments).map {
+            LiveSegment(text: Self.stripSpecialTokens($0.text), end: Double($0.end))
+        }
         let detected: String
         if let lockedLanguage {
             detected = lockedLanguage
