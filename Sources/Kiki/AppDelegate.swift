@@ -816,17 +816,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 await MainActor.run { self.markReady(refinementAvailable: false) }
             }
 
-            // F4: el tiny del wake se carga al final, sin bloquear el arranque
-            // ni la UI de progreso. El listener ya funciona con el modelo
-            // grande mientras tanto.
-            do {
-                await self.wakeTranscriber.setDictionaryProvider(self.wakePhraseBias)
-                try await self.wakeTranscriber.prepare()
-                self.wakeListener.setWakeVerifier(self.wakeTranscriber)
-                KikiLog.log("kiki wake: verificador tiny activo (con prompt-bias)")
-            } catch {
-                KikiLog.log("kiki wake: tiny no cargó (\(error)); se sigue verificando con el modelo principal")
-            }
+            // Verificador del wake = modelo PRINCIPAL (preciso). El tiny se
+            // retiró como verificador (2026-07-18): con voces/mics reales
+            // transcribía basura en el wake-check ("[Música]", "[BLANK_AUDIO]",
+            // galimatías), y ni la frase ni los comandos de voz matcheaban
+            // ("antes funcionaba" = antes de que el tiny cargara y reemplazara
+            // al principal). El principal ya está cargado; solo transcribe
+            // segmentos detectados por VAD (no continuo), así que el costo por
+            // utterance es aceptable a cambio de detección fiable.
+            KikiLog.log("kiki wake: verificador = modelo principal (tiny desactivado por precisión)")
         }
     }
 
@@ -1074,6 +1072,10 @@ extension AppDelegate: WakeListenerDelegate {
             // inserta) y se sale del continuo → escucha pasiva. Si no, se
             // inserta como dictado normal (sin re-transcribir).
             if continuous {
+                // Feedback inmediato: pasa a "procesando" (contorno) mientras se
+                // transcribe/revisa el comando, para que la nube no parezca
+                // pegada en grabación durante el ~1s del chequeo.
+                self.hud.show(state: .processing)
                 let text = (try? await self.transcriber.transcribe(samples, knownLanguage: forced)) ?? ""
                 if WakePhraseMatcher.detectCommand(text) == .stopHandsFree {
                     KikiLog.log("kiki wake: comando 'detente' — manos libres OFF")
