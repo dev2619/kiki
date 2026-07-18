@@ -125,6 +125,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// fija en `true` justo antes de lanzar `controller.process`/
     /// `processTranscript` y se limpia apenas se consume en el resume.
     private var resumeAsArmed = false
+    /// Modo MANOS LIBRES CONTINUO activado por VOZ (comando "manos libres kiki"),
+    /// distinto del toggle `wakeEnabled` de Ajustes (2026-07-18). Cuando está
+    /// activo, tras cada captura la sesión se RE-ARMA (dicta continuo sin repetir
+    /// la frase). Con él en `false` y `wakeEnabled` en `false`, la frase
+    /// "escúchame kiki" es UNA SOLA TOMA: tras insertar, vuelve a escucha pasiva
+    /// (esperando la frase), no sigue dictando. Se apaga con "kiki detente".
+    private var voiceHandsFreeActive = false
 
     // Stores + adapters de personalización (Fase 3, Task 3/4). AppDelegate es
     // el dueño fuerte de todo esto; los providers que se inyectan en
@@ -1030,7 +1037,7 @@ extension AppDelegate: WakeListenerDelegate {
         // `alwaysListening` ON, la frase pudo haber armado esta sesión SIN
         // que `wakeEnabled` estuviera encendido — el resume debe seguir
         // tratándola como sesión vigente igual que con el toggle prendido.
-        resumeAsArmed = (wakeEnabled || alwaysListening) && sessionIsCurrent
+        resumeAsArmed = (wakeEnabled || voiceHandsFreeActive) && sessionIsCurrent
         // F1 Task 5: limpia la burbuja ANTES de rutear la entrega final, mismo
         // orden que `DictationController.hotkeyReleased` (limpia el parcial
         // antes de `.processing`). El coordinator ya se canceló/limpió en el
@@ -1070,7 +1077,7 @@ extension AppDelegate: WakeListenerDelegate {
         // listening plano. Gateado por `wakeEnabled || alwaysListening` y por
         // el token de frescura por las mismas razones (ver traza de la
         // carrera arriba y el comentario equivalente en wakeListenerDidCapture).
-        resumeAsArmed = (wakeEnabled || alwaysListening) && sessionIsCurrent
+        resumeAsArmed = (wakeEnabled || voiceHandsFreeActive) && sessionIsCurrent
         // F1 Task 5: mismo aliento con modo live ON también salta refinado/
         // traducción — el texto que el usuario dijo se inserta tal cual,
         // consistente con el resto del flujo manos-libres en modo live
