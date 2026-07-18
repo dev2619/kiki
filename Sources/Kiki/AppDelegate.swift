@@ -1081,8 +1081,12 @@ extension AppDelegate: WakeListenerDelegate {
                     KikiLog.log("kiki wake: comando 'detente' — manos libres OFF")
                     self.voiceHandsFreeActive = false
                     self.resumeAsArmed = false
-                    self.hud.showTransient("Manos libres desactivado")
                     self.restartPassiveListeningIfEnabled()
+                    // Resetea el estado ".processing" que fijamos arriba para el
+                    // feedback — sin esto la nube quedaba PEGADA en procesando al
+                    // desvanecerse el aviso (revertía a model.state == .processing).
+                    self.hud.show(state: .idle)
+                    self.hud.showTransient("Manos libres desactivado")
                     return
                 }
                 let language: String
@@ -1109,7 +1113,9 @@ extension AppDelegate: WakeListenerDelegate {
         wakeListener.stop()
         wakePausedByDictation = false
         resumeAsArmed = false
-        hud.showArmed(false)
+        // No se toca el HUD aquí (el aviso "Manos libres desactivado" y su
+        // auto-ocultado lo gobiernan en el caller) — llamar `showArmed(false)`
+        // con un transient visible lo ocultaría.
         guard wakeEnabled || alwaysListening else { return }
         do {
             try wakeListener.start()
