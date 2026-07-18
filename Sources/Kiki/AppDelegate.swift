@@ -990,6 +990,15 @@ extension AppDelegate: WakeListenerDelegate {
         hud.showArmed(true)
     }
 
+    /// Comando de voz "manos libres kiki": activa el modo continuo — tras cada
+    /// captura la sesión se re-arma (dicta sin repetir la frase) hasta "kiki
+    /// detente". El `arm()` ya lo hizo el listener; aquí solo se marca el flag
+    /// (leído por `resumeAsArmed` en las capturas).
+    func wakeListenerDidStartHandsFree() {
+        voiceHandsFreeActive = true
+        hud.showTransient("Manos libres activado")
+    }
+
     func wakeListenerDidStartCapture() {
         SoundCues.play(.captureStart)
         // No hud.showArmed(false) aquí: la sesión sigue armada durante toda
@@ -1052,16 +1061,58 @@ extension AppDelegate: WakeListenerDelegate {
         // de ENTREGA persistente entre `.armed` y el resultado — solo el
         // display-only de arriba, que ya se descartó).
         let liveOn = SettingsViewModel.effectiveLiveTranscription()
+        let continuous = voiceHandsFreeActive
+        let forced = SettingsViewModel.effectiveDictationLanguage()
         // No hud.show(state: .idle) aquí: controller.process() dispara
         // dictationStateDidChange(.processing) casi de inmediato vía su
         // delegate, así que un orderOut(.idle) intermedio solo producía un
         // flicker visible de la pill entre "Escuchando…" y "Procesando…".
-        Task {
+        Task { @MainActor in
+            // Modo manos-libres CONTINUO por voz: cada utterance puede ser el
+            // comando de PARADA ("kiki detente"). Se transcribe una vez (con
+            // gates), se revisa el comando, y si lo es se CONSUME (no se
+            // inserta) y se sale del continuo → escucha pasiva. Si no, se
+            // inserta como dictado normal (sin re-transcribir).
+            if continuous {
+                let text = (try? await self.transcriber.transcribe(samples, knownLanguage: forced)) ?? ""
+                if WakePhraseMatcher.detectCommand(text) == .stopHandsFree {
+                    KikiLog.log("kiki wake: comando 'detente' — manos libres OFF")
+                    self.voiceHandsFreeActive = false
+                    self.resumeAsArmed = false
+                    self.hud.showTransient("Manos libres desactivado")
+                    self.restartPassiveListeningIfEnabled()
+                    return
+                }
+                let language: String
+                if let forced {
+                    language = forced
+                } else {
+                    language = await self.transcriber.detectedLanguage()
+                }
+                await self.controller.processTranscript(text, language: language, bypassEnhancement: false)
+                return
+            }
             if liveOn {
                 await controller.processLive(samples: samples)
             } else {
                 await controller.process(samples: samples)
             }
+        }
+    }
+
+    /// Tras "kiki detente": sale del modo continuo y vuelve a escucha PASIVA de
+    /// la frase (si la escucha por voz sigue habilitada); si no, detiene el
+    /// listener. Reinicia limpio (`stop`+`start`) desde el estado armado.
+    @MainActor private func restartPassiveListeningIfEnabled() {
+        wakeListener.stop()
+        wakePausedByDictation = false
+        resumeAsArmed = false
+        hud.showArmed(false)
+        guard wakeEnabled || alwaysListening else { return }
+        do {
+            try wakeListener.start()
+        } catch {
+            wakeStartFailed(error, context: "reiniciar escucha pasiva tras 'detente'")
         }
     }
 

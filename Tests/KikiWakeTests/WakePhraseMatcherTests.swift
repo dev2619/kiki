@@ -281,4 +281,33 @@ final class WakePhraseMatcherTests: XCTestCase {
     func testKiwiAloneDoesNotMatch() {
         XCTAssertNil(WakePhraseMatcher.match("kiwi"))
     }
+
+    // MARK: - Comandos de voz de manos libres (2026-07-18)
+
+    func testStartHandsFreeSpanish() {
+        XCTAssertEqual(WakePhraseMatcher.detectCommand("manos libres kiki"), .startHandsFree)
+        XCTAssertEqual(WakePhraseMatcher.detectCommand("Manos libres, Kiki."), .startHandsFree)
+    }
+
+    func testStartHandsFreeEnglish() {
+        XCTAssertEqual(WakePhraseMatcher.detectCommand("hands free kiki"), .startHandsFree)
+    }
+
+    func testStopHandsFree() {
+        XCTAssertEqual(WakePhraseMatcher.detectCommand("kiki detente"), .stopHandsFree)
+        XCTAssertEqual(WakePhraseMatcher.detectCommand("detente kiki"), .stopHandsFree)
+        XCTAssertEqual(WakePhraseMatcher.detectCommand("para kiki"), .stopHandsFree)
+        XCTAssertEqual(WakePhraseMatcher.detectCommand("Kiki, detente."), .stopHandsFree)
+    }
+
+    func testNormalDictationIsNotACommand() {
+        // Una palabra del comando dentro de un dictado real NO debe disparar.
+        XCTAssertNil(WakePhraseMatcher.detectCommand("necesito que te detengas en el segundo punto del informe"))
+        XCTAssertNil(WakePhraseMatcher.detectCommand("hola cómo estás"))
+        XCTAssertNil(WakePhraseMatcher.detectCommand("manos a la obra con el proyecto nuevo"))
+    }
+
+    func testWakePhraseIsNotAHandsFreeCommand() {
+        XCTAssertNil(WakePhraseMatcher.detectCommand("escúchame kiki"))
+    }
 }

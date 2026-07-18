@@ -98,6 +98,56 @@ public enum WakePhraseMatcher {
         WakeSlot("kiki", maxTokens: 1, maxEditDistance: 1),
     ]
 
+    /// Comandos de voz de manos libres (2026-07-18). Distintos de la frase de
+    /// dictado: NO llevan remainder — son órdenes que se consumen (nunca se
+    /// insertan como texto).
+    public enum WakeCommand: Equatable {
+        case startHandsFree   // "manos libres kiki" / "hands free kiki"
+        case stopHandsFree    // "kiki detente" / "detente kiki" / "kiki stop"
+    }
+
+    private static let startHandsFreeSlots: [[WakeSlot]] = [
+        [WakeSlot("manos"), WakeSlot("libres"), WakeSlot("kiki")],
+        [WakeSlot("hands"), WakeSlot("free"), WakeSlot("kiki")],
+    ]
+    private static let stopHandsFreeSlots: [[WakeSlot]] = [
+        [WakeSlot("kiki"), WakeSlot("detente")],
+        [WakeSlot("detente"), WakeSlot("kiki")],
+        [WakeSlot("kiki"), WakeSlot("stop")],
+        [WakeSlot("para"), WakeSlot("kiki")],
+    ]
+
+    /// Detecta un comando de voz de manos libres en una utterance. Exige que el
+    /// comando sea prácticamente TODA la utterance (poco preámbulo y poca cola)
+    /// para no dispararse por una palabra suelta en medio de un dictado normal.
+    public static func detectCommand(_ transcript: String) -> WakeCommand? {
+        let tokens = normalizedTokensOnly(transcript)
+        guard !tokens.isEmpty else { return nil }
+        func isWholeCommand(_ slots: [WakeSlot]) -> Bool {
+            guard let (start, consumed) = findSlotMatch(slots, in: tokens) else { return false }
+            // Casi toda la utterance = el comando (evita falsos positivos
+            // cuando "detente"/"para" aparecen dentro de un dictado largo).
+            return start <= maxPreambleWords && (tokens.count - (start + consumed)) <= 1
+        }
+        for slots in startHandsFreeSlots where isWholeCommand(slots) { return .startHandsFree }
+        for slots in stopHandsFreeSlots where isWholeCommand(slots) { return .stopHandsFree }
+        return nil
+    }
+
+    /// Tokens normalizados (lowercase + fold + strip puntuación, partidos por
+    /// espacio y guion) — la misma normalización que usa `match`, sin el
+    /// back-ref a palabras originales (los comandos no producen remainder).
+    private static func normalizedTokensOnly(_ transcript: String) -> [String] {
+        var out: [String] = []
+        for word in tokenizeOriginal(transcript.trimmingCharacters(in: .whitespaces)) {
+            for sub in splitOnHyphen(word) {
+                let n = normalizeWord(sub)
+                if !n.isEmpty { out.append(n) }
+            }
+        }
+        return out
+    }
+
     /// Matches the transcript against wake phrases.
     /// Returns a WakeMatch if the transcript contains a wake phrase (with ≤2 preamble words tolerated).
     /// Returns nil if no phrase is found or if the phrase appears with >2 preamble words.

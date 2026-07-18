@@ -32,6 +32,14 @@ public protocol WakeListenerDelegate: AnyObject {
     func wakeListenerDidCaptureSameBreath(text: String, language: String, sessionIsCurrent: Bool)
     /// Se armó pero no hubo dictado dentro del timeout.
     func wakeListenerDidDisarm()
+    /// Comando de voz "manos libres kiki": el usuario pidió MODO CONTINUO. El
+    /// delegate activa el continuo (re-armar tras cada captura). El listener ya
+    /// armó tras notificar. Default vacío para no romper otros conformers.
+    func wakeListenerDidStartHandsFree()
+}
+
+public extension WakeListenerDelegate {
+    func wakeListenerDidStartHandsFree() {}
 }
 
 /// Escucha continua de micrófono para el flujo manos-libres: alimenta un
@@ -875,6 +883,15 @@ public final class WakeListener: @unchecked Sendable {
     private func applyMatch(_ text: String, language: String, samples: [Float], usedVerifier: Bool) {
         dispatchPrecondition(condition: .onQueue(queue))
         guard let match = WakePhraseMatcher.match(text) else {
+            // Comando de voz "manos libres kiki": arma Y avisa al delegate para
+            // entrar en modo continuo. Se consume (no es dictado). El chime/HUD
+            // de armado los produce `arm()` igual que con la frase normal.
+            if WakePhraseMatcher.detectCommand(text) == .startHandsFree {
+                KikiLog.log("kiki wake: comando 'manos libres' — modo continuo")
+                notify { $0.wakeListenerDidStartHandsFree() }
+                arm()
+                return
+            }
             // Regla de privacidad: NO se loggea el contenido de segmentos sin
             // match (conversación ajena a kiki), solo duración.
             let seconds = Double(samples.count) / Self.sampleRate
