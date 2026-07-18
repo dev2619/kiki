@@ -846,6 +846,13 @@ public final class WakeListener: @unchecked Sendable {
                 // `applyMatch`), solo duraciones y si matcheó o no.
                 let matched = text.flatMap(WakePhraseMatcher.match) != nil
                 KikiLog.log("kiki wake: check — segmento \(String(format: "%.1f", segmentSeconds))s, transcripción \(String(format: "%.1f", transcribeSeconds))s, match \(matched ? "sí" : "no")")
+                // Calibración (opt-in, off por defecto — regla de privacidad):
+                // con KIKI_WAKE_DEBUG=1 se loguea el TEXTO que Whisper oyó en el
+                // wake-check, para ajustar el matcher a cómo transcribe la frase
+                // en la voz real del usuario. Nunca en uso normal.
+                if ProcessInfo.processInfo.environment["KIKI_WAKE_DEBUG"] == "1", let text {
+                    KikiLog.log("kiki wake: [debug] oído: \"\(text)\"")
+                }
                 if self._state == .listening, let text {
                     self.applyMatch(text, language: detectedLanguage, samples: samples, usedVerifier: usedVerifier)
                 }

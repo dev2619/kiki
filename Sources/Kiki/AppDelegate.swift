@@ -30,19 +30,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return Float(stored)
     }
 
-    /// Lee `kiki.alwaysListening` de `UserDefaults`, default `true` cuando la
-    /// clave está ausente (pedido explícito del owner: la frase de activación
-    /// debe funcionar desde el primer arranque, sin acción previa). Mismo
-    /// patrón de "ausente vs. false" que `SettingsViewModel.soundCuesEnabled`
-    /// — `bool(forKey:)` no distingue ambos casos, así que se chequea
-    /// `object(forKey:) != nil` explícitamente. La clave vive en
-    /// `SettingsViewModel.alwaysListeningDefaultsKey` (fuente de escritura),
-    /// igual que `translateEnabledDefaultsKey`.
+    /// Lee `kiki.alwaysListening` de `UserDefaults`, default `false` cuando la
+    /// clave está ausente (cambio 2026-07-18, feedback de campo: "se pone a
+    /// escuchar solo, ni siquiera lo activo"). Con el mic abierto siempre para
+    /// la frase, macOS muestra el punto naranja de uso permanente y kiki
+    /// "escucha sin activarlo" — sorpresa/privacidad no deseada. Ahora la
+    /// escucha por frase es OPT-IN: el usuario la enciende desde Ajustes
+    /// ("Escucha siempre activa") o el menú. El dictado por Fn no la necesita.
+    /// Mismo patrón "ausente vs. false" (`object(forKey:) != nil`). La clave
+    /// vive en `SettingsViewModel.alwaysListeningDefaultsKey`.
     private static func effectiveAlwaysListening() -> Bool {
         let defaults = UserDefaults.standard
         return defaults.object(forKey: SettingsViewModel.alwaysListeningDefaultsKey) != nil
             ? defaults.bool(forKey: SettingsViewModel.alwaysListeningDefaultsKey)
-            : true
+            : false
     }
 
     /// Lee `kiki.historyCap` de `UserDefaults` para construir `historyStore`

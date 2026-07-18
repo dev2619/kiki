@@ -429,9 +429,11 @@ final class SettingsViewModel: ObservableObject {
             ? defaults.bool(forKey: Self.refineEnabledDefaultsKey)
             : true
         self.translateEnabled = defaults.bool(forKey: Self.translateEnabledDefaultsKey)
+        // Default false (2026-07-18): la escucha por frase es OPT-IN — ver
+        // `AppDelegate.effectiveAlwaysListening`. No abrir el mic solo.
         self.alwaysListening = defaults.object(forKey: Self.alwaysListeningDefaultsKey) != nil
             ? defaults.bool(forKey: Self.alwaysListeningDefaultsKey)
-            : true
+            : false
         self.liveTranscriptionEnabled = Self.effectiveLiveTranscription()
         // Migrar el toggle viejo ANTES de leer las keys nuevas (ver
         // `migrateRestoreClipboardIfNeeded`).
