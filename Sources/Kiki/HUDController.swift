@@ -22,9 +22,11 @@ final class HUDController {
     private static let liveSize = NSSize(width: 440, height: 66)       // texto en vivo (Paso 2): ~2 líneas, scroll interno pasado eso
     private static let processingSize = NSSize(width: 220, height: 50) // contorno multicolor girando (mismo ancho → sin salto rec→proc)
     private static let armedSize = NSSize(width: 200, height: 50)      // "Te escucho…"
-    // Resultado: ancho fijo, ALTO dinámico según el texto (crece hasta caber;
-    // más allá del máximo hay scroll interno en `HUDView.resultRow`).
-    private static let resultWidth: CGFloat = 440
+    // Resultado: ancho Y alto DINÁMICOS según el texto — texto corto = píldora
+    // angosta (sin espacio sobrante); texto que no cabe en `maxResultWidth` se
+    // ajusta a ese ancho y crece en alto (scroll interno pasado `maxResultHeight`).
+    private static let minResultWidth: CGFloat = 160
+    private static let maxResultWidth: CGFloat = 440
     private static let minResultHeight: CGFloat = 58
     private static let maxResultHeight: CGFloat = 220
 
@@ -218,17 +220,25 @@ final class HUDController {
     /// excede el máximo (hay scroll interno → se muestra la flecha de pista).
     private static func computeResultSize(for text: String) -> (size: NSSize, scrollable: Bool) {
         let font = NSFont.systemFont(ofSize: 14, weight: .medium)
-        let horizontalPadding: CGFloat = 22 * 2   // .padding(.horizontal, 22)
-        let iconColumn: CGFloat = 17 + 11         // ✓ + spacing del HStack
-        let textWidth = resultWidth - horizontalPadding - iconColumn
+        let chrome: CGFloat = 22 * 2 + (17 + 11)  // padding horizontal + columna ✓
+        let verticalPadding: CGFloat = 12 * 2
+        // Ancho natural en UNA línea. Si cabe bajo el máximo → píldora angosta
+        // a la medida del texto (sin espacio sobrante). Si no → ancho máximo y
+        // el texto se envuelve creciendo en alto.
+        let singleLine = ceil((text as NSString).size(withAttributes: [.font: font]).width)
+        let naturalWidth = singleLine + chrome
+        if naturalWidth <= maxResultWidth {
+            let width = min(max(naturalWidth, minResultWidth), maxResultWidth)
+            return (NSSize(width: width, height: minResultHeight), false)
+        }
+        let textWidth = maxResultWidth - chrome
         let bounding = (text as NSString).boundingRect(
             with: NSSize(width: textWidth, height: .greatestFiniteMagnitude),
             options: [.usesLineFragmentOrigin, .usesFontLeading],
             attributes: [.font: font])
-        let verticalPadding: CGFloat = 12 * 2     // .padding(.vertical, 12)
         let needed = ceil(bounding.height) + verticalPadding
         let height = min(max(needed, minResultHeight), maxResultHeight)
-        return (NSSize(width: resultWidth, height: height), needed > maxResultHeight)
+        return (NSSize(width: maxResultWidth, height: height), needed > maxResultHeight)
     }
 
     /// Tamaño objetivo según el contenido actual.
