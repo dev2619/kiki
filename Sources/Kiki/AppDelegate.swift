@@ -365,6 +365,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 if self.controller.state == .recording {
                     self.controller.cancel()
                 }
+                // Esc también sale del modo continuo por voz (semántica de stop
+                // unificada con "kiki detente" y el menú).
+                self.voiceHandsFreeActive = false
                 self.wakeListener?.cancelCapture()
             }
         })
@@ -587,6 +590,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // `dictationStateDidChange` y por `cancelCapture()`/Esc — esos
             // son "pausar"/"cancelar", no "ya terminé".
             wakeListener.stopAndFlush()
+            voiceHandsFreeActive = false
             hud.showArmed(false)
             // F1 Task 5: si `stopAndFlush()` no alcanzó a volcar una utterance
             // en curso vía `wakeListenerDidCapture` (que ya limpia esto por su
@@ -684,6 +688,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             hud.showTransient("No disponible durante un dictado")
             return
         }
+        // Arme manual fresco: el continuo aquí lo gobierna `wakeEnabled`, no el
+        // flag de voz — se limpia para no arrastrar un "manos libres" por voz.
+        voiceHandsFreeActive = false
         if !wakeEnabled {
             wakeEnabled = true
             UserDefaults.standard.set(true, forKey: Self.wakeEnabledKey)
@@ -758,7 +765,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @MainActor private func handleAlwaysListeningChanged() {
         let key = SettingsViewModel.alwaysListeningDefaultsKey
         let defaults = UserDefaults.standard
-        let newValue = defaults.object(forKey: key) != nil ? defaults.bool(forKey: key) : true
+        // Default false en ausencia — consistente con effectiveAlwaysListening()
+        // y SettingsViewModel (antes leía true aquí, la única inconsistencia).
+        let newValue = defaults.object(forKey: key) != nil ? defaults.bool(forKey: key) : false
         guard newValue != alwaysListening else { return }
         alwaysListening = newValue
         updateStatusIcon()
@@ -784,6 +793,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // "Escuchando…" que si no quedaría pegada para siempre (ambos
             // flags en OFF → ningún camino futuro la limpiaría).
             wakeListener.stopAndFlush()
+            voiceHandsFreeActive = false
             hud.showArmed(false)
             // Ver comentario equivalente en la rama OFF de `toggleWake`.
             wakeLiveCoordinator?.cancel()

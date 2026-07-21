@@ -182,9 +182,9 @@ private struct GeneralSectionView: View {
             }
 
             Section {
-                Toggle("Escucha siempre activa", isOn: $viewModel.alwaysListening)
+                Toggle("Escucha por voz", isOn: $viewModel.alwaysListening)
             } footer: {
-                Text("Con esto activado (por defecto), decir \"escúchame kiki\" empieza a dictar sin tocar nada — ni el toggle de arriba ni ⌥⌘K. Para que la frase funcione en cualquier momento, el micrófono queda abierto todo el tiempo que kiki esté corriendo (macOS muestra el punto naranja de uso de micrófono de forma permanente en la barra de menú). Si el ruido de fondo te molesta, prueba activando \"Aislamiento de voz\" en Centro de Control → micrófono.")
+                Text("Activa la escucha de comandos de voz: \"escúchame kiki\" dicta una toma, \"manos libres kiki\" activa el modo continuo y \"kiki detente\" lo desactiva. Desactivado por defecto (no escucha sola). Con esto activado, el micrófono queda abierto mientras kiki corre (macOS muestra el punto naranja permanente). Si el ruido de fondo te molesta, prueba \"Aislamiento de voz\" en Centro de Control → micrófono.")
             }
 
             Section {
