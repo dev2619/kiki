@@ -1,0 +1,85 @@
+# kiki — modelo wake-word "escúchame kiki" (dispara UNA toma de dictado).
+# Motor: LiveKit Wakeword (openWakeWord + conv-attention). TTS: VoxCPM (español).
+# Entrena con:  livekit-wakeword setup --config <este archivo>
+#               livekit-wakeword run   <este archivo>
+# Salida:       output/escuchame_kiki/escuchame_kiki.onnx  → App/Resources/wakewords/
+
+model_name: escuchame_kiki
+
+# Frases positivas (con/ sin acento — cubre cómo la diga el usuario).
+target_phrases:
+  - "escúchame kiki"
+  - "escuchame kiki"
+
+tts_backend: voxcpm
+
+# Muestras: reducidas vs prod (25000) para un run overnight en M1. Súbelas si
+# quieres más precisión (a costa de tiempo — VoxCPM ~4.5s/clip, secuencial).
+n_samples: 2500
+n_samples_val: 500
+n_background_samples: 1000
+n_background_samples_val: 250
+tts_batch_size: 1
+
+# CROSS-NEGATIVOS: clave para NO disparar con los OTROS comandos ni con
+# palabras parecidas → bajos falsos positivos.
+custom_negative_phrases:
+  - "kiki"
+  - "escúchame"
+  - "escucha"
+  - "óyeme kiki"
+  - "oye kiki"
+  - "hola kiki"
+  - "manos libres kiki"
+  - "kiki detente"
+  - "detente kiki"
+  - "para kiki"
+  - "quique"
+  - "escúchame quique"
+
+data_dir: ./data
+output_dir: ./output
+
+voxcpm_tts:
+  model_id: openbmb/VoxCPM2
+  model_cache_relpath: voxcpm/VoxCPM2
+  load_denoiser: false
+  cfg_values: [2.0, 2.5]
+  inference_timesteps_list: [10]
+  voice_design_prompts:
+    - "A young adult woman, Latin American Spanish accent, clear mid-pitch, calm pace"
+    - "A young adult man, Latin American Spanish accent, warm baritone, steady pace"
+    - "A middle-aged woman, Castilian Spanish accent, measured confident tone"
+    - "A middle-aged man, Latin American Spanish accent, deep resonant, slow pace"
+    - "An older woman, Spanish accent, soft gentle voice, slower pace"
+    - "A young man, Spanish accent, light tenor, quick conversational pace"
+    - "A woman in her thirties, neutral Spanish accent, smooth alto, even pace"
+    - "A man in his thirties, Mexican Spanish accent, clear baritone, businesslike"
+    - "A cheerful young woman, Spanish accent, bright energetic, medium-fast pace"
+    - "A serious man, Spanish accent, minimal emotion, precise articulation"
+    - "A friendly customer-service voice, Colombian Spanish accent, medium pace"
+    - "A quiet intimate voice, Spanish accent, close-mic feel, slow and clear"
+
+augmentation:
+  clip_duration: 2.0
+  batch_size: 16
+  rounds: 3
+  background_paths: [./data/backgrounds]
+  rir_paths: [./data/rirs]
+
+model:
+  model_type: conv_attention
+  model_size: small
+
+steps: 30000
+learning_rate: 0.0001
+weight_decay: 0.01
+label_smoothing: 0.05
+max_negative_weight: 3000
+target_fp_per_hour: 0.5
+
+batch_n_per_class:
+  positive: 50
+  adversarial_negative: 50
+  ACAV100M_sample: 128
+  background_noise: 25
