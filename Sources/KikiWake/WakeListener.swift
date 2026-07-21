@@ -36,10 +36,15 @@ public protocol WakeListenerDelegate: AnyObject {
     /// delegate activa el continuo (re-armar tras cada captura). El listener ya
     /// armó tras notificar. Default vacío para no romper otros conformers.
     func wakeListenerDidStartHandsFree()
+    /// Comando de voz "kiki detente" detectado por el motor wake-word: sale del
+    /// modo continuo. El listener ya descartó la captura en curso (la frase NO
+    /// se dicta) y volvió a `.listening`. El delegate apaga el continuo.
+    func wakeListenerDidStopHandsFree()
 }
 
 public extension WakeListenerDelegate {
     func wakeListenerDidStartHandsFree() {}
+    func wakeListenerDidStopHandsFree() {}
 }
 
 /// Escucha continua de micrófono para el flujo manos-libres: alimenta un
@@ -211,6 +216,12 @@ public final class WakeListener: @unchecked Sendable {
     /// verificar con `transcriber` (comportamiento pre-F4 y fallback si el
     /// tiny no cargó). Confinado a `queue` como el resto del estado.
     private var wakeVerifier: Transcribing?
+    /// Motor wake-word abierto (LiveKit). Cuando está presente, la detección de
+    /// la frase/comandos la hace ÉL al instante (sin transcribir): se alimenta
+    /// con cada chunk en `handle`, y sus triggers entran por `handleTrigger`.
+    /// La transcripción-por-segmento de `.listening` se salta (ver
+    /// `handleListeningSegment`). `nil` = fallback al camino por Whisper.
+    private var wakeWordDetector: WakeWordDetecting?
     private var transcriptionTask: Task<Void, Never>?
     private var disarmTask: Task<Void, Never>?
     /// Incrementado en cada start()/stop(). Las tareas de transcripción en
@@ -644,6 +655,45 @@ public final class WakeListener: @unchecked Sendable {
         queue.sync { self.wakeVerifier = verifier }
     }
 
+    /// Inyecta (o quita) el motor wake-word. Sus triggers se enrutan a `queue`.
+    public func setWakeWordDetector(_ detector: WakeWordDetecting?) {
+        queue.sync {
+            self.wakeWordDetector?.stop()
+            self.wakeWordDetector = detector
+            detector?.onTrigger = { [weak self] trigger in
+                self?.queue.async { self?.handleTrigger(trigger) }
+            }
+        }
+    }
+
+    /// Trigger del motor wake-word (instantáneo, sin transcribir). Corre en
+    /// `queue`.
+    private func handleTrigger(_ trigger: WakeTrigger) {
+        dispatchPrecondition(condition: .onQueue(queue))
+        guard _state != .stopped else { return }
+        switch trigger {
+        case .dictate:
+            guard _state == .listening else { return }
+            arm()
+        case .startHandsFree:
+            guard _state == .listening else { return }
+            notify { $0.wakeListenerDidStartHandsFree() }
+            arm()
+        case .stopHandsFree:
+            guard _state == .armed else { return }
+            // Descarta la captura en curso — la utterance "kiki detente" NO se
+            // dicta — y vuelve a listening (mismo reset que `cancelCapture`).
+            cancelDisarmTimeout()
+            segmenter = makeSegmenter(config: listeningConfig)
+            _state = .listening
+            suppressUntilSampleCount = nil
+            hasCapturedInSession = false
+            armedSpeechActive = false
+            KikiLog.log("kiki wake: 'detente' (wake-word) — salgo del continuo")
+            notify { $0.wakeListenerDidStopHandsFree() }
+        }
+    }
+
     // MARK: - Tap handling (confinado a `queue`)
 
     private func handle(chunk: [Float], rms: Float) {
@@ -661,6 +711,9 @@ public final class WakeListener: @unchecked Sendable {
             }
             suppressUntilSampleCount = nil
         }
+        // Motor wake-word (si está): ve todo el audio y dispara triggers al
+        // instante (frase/comandos) vía `handleTrigger`, sin transcribir.
+        wakeWordDetector?.process(chunk)
         let event = segmenter.process(chunk: chunk, rms: rms)
         if _state == .armed {
             forwardArmedChunkIfActive(chunk, event: event)
@@ -777,6 +830,10 @@ public final class WakeListener: @unchecked Sendable {
     }
 
     private func handleListeningSegment(_ samples: [Float]) {
+        // Con motor wake-word presente, la detección de la frase la hace ÉL al
+        // instante — no transcribimos los segmentos de `.listening` con Whisper
+        // (ahorra CPU y evita detectar la frase por dos vías).
+        if wakeWordDetector != nil { return }
         guard !isTranscribing else {
             // Ya no se descarta (bug de campo: la frase de activación podía
             // llegar completa justo durante el check en vuelo de un

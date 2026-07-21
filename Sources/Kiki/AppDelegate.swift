@@ -132,6 +132,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// "escúchame kiki" es UNA SOLA TOMA: tras insertar, vuelve a escucha pasiva
     /// (esperando la frase), no sigue dictando. Se apaga con "kiki detente".
     private var voiceHandsFreeActive = false
+    /// Motor wake-word abierto (LiveKit), retenido mientras corre. `nil` si no
+    /// hay modelos `.onnx` en el bundle → fallback a la detección por Whisper.
+    private var wakeWordDetector: LiveKitWakeWordDetector?
+    /// `true` cuando el motor wake-word está activo — entonces "kiki detente" lo
+    /// detecta ÉL al instante y la ruta de captura continua NO hace el
+    /// transcribe-check del comando.
+    private var wakeWordEngineActive = false
+
+    /// Construye el detector wake-word desde `Resources/wakewords/*.onnx` del
+    /// bundle. Devuelve `nil` (y kiki cae a Whisper) si no hay modelos o falla.
+    private func makeWakeWordDetector() -> LiveKitWakeWordDetector? {
+        let dir = Bundle.main.resourceURL?.appendingPathComponent("wakewords")
+        func onnx(_ name: String) -> URL? {
+            guard let u = dir?.appendingPathComponent("\(name).onnx"),
+                  FileManager.default.fileExists(atPath: u.path) else { return nil }
+            return u
+        }
+        var models: [(url: URL, trigger: WakeTrigger)] = []
+        if let u = onnx("escuchame_kiki") { models.append((u, .dictate)) }
+        if let u = onnx("manos_libres_kiki") { models.append((u, .startHandsFree)) }
+        if let u = onnx("kiki_detente") { models.append((u, .stopHandsFree)) }
+        guard !models.isEmpty else {
+            KikiLog.log("kiki wake: sin modelos wake-word (.onnx) — detección por Whisper")
+            return nil
+        }
+        do {
+            return try LiveKitWakeWordDetector(models: models)
+        } catch {
+            KikiLog.log("kiki wake: motor wake-word no cargó (\(error)) — fallback a Whisper")
+            return nil
+        }
+    }
 
     // Stores + adapters de personalización (Fase 3, Task 3/4). AppDelegate es
     // el dueño fuerte de todo esto; los providers que se inyectan en
@@ -279,6 +311,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         wakeListener = WakeListener(transcriber: transcriber, speechRMSThreshold: Self.effectiveWakeRMSThreshold())
         wakeListener.delegate = self
+        // Motor wake-word abierto: si hay modelos .onnx en el bundle, la
+        // detección de frase/comandos es INSTANTÁNEA (sin transcribir). Si no,
+        // `nil` → el listener cae a la detección por Whisper.
+        if let detector = makeWakeWordDetector() {
+            wakeWordDetector = detector
+            wakeWordEngineActive = true
+            wakeListener.setWakeWordDetector(detector)
+        }
         // F1 Task 5: parciales display-only del flujo manos-libres — ver doc
         // de `wakeLiveCoordinator`/`startWakeLiveIfEnabled`. Invocado sobre la
         // cola serial de `WakeListener` (ver doc de `onArmedChunk`), por eso
@@ -995,6 +1035,14 @@ extension AppDelegate: WakeListenerDelegate {
     func wakeListenerDidStartHandsFree() {
         voiceHandsFreeActive = true
         hud.showTransient("Manos libres activado")
+    }
+
+    /// "kiki detente" detectado por el motor wake-word (instantáneo). El
+    /// listener ya descartó la captura y volvió a listening; aquí solo se apaga
+    /// el continuo y se confirma.
+    func wakeListenerDidStopHandsFree() {
+        voiceHandsFreeActive = false
+        hud.showTransient("Manos libres desactivado")
     }
 
     func wakeListenerDidStartCapture() {

@@ -33,6 +33,13 @@ bundle: build
 	# mlx-swift_Cmlx.bundle/Contents/Resources/default.metallib (shaders Metal
 	# de MLX, requeridos en runtime para GPU) y swift-transformers_Hub.bundle.
 	-cp -R $(XCODE_PRODUCTS)/*.bundle $(APP)/Contents/Resources/ 2>/dev/null
+	# Modelos wake-word (.onnx) entrenados — opcionales: si no existen, kiki
+	# cae a la detección por Whisper (ver AppDelegate.makeWakeWordDetector).
+	@if ls App/Resources/wakewords/*.onnx >/dev/null 2>&1; then \
+		mkdir -p $(APP)/Contents/Resources/wakewords; \
+		cp App/Resources/wakewords/*.onnx $(APP)/Contents/Resources/wakewords/; \
+		echo "wake-word: $$(ls App/Resources/wakewords/*.onnx | wc -l | tr -d ' ') modelo(s) empaquetado(s)"; \
+	else echo "wake-word: sin modelos .onnx (kiki usará Whisper)"; fi
 	codesign --force --sign "$(SIGN_ID)" $(APP)
 	@if [ -z "$$(find $(APP) -name '*.metallib' -print -quit)" ]; then \
 		echo "ERROR: no se encontró ningún .metallib en $(APP) — MLX no podrá inicializar Metal en runtime." >&2; \
