@@ -1,5 +1,5 @@
 {
-  "originHash" : "6f25ade3e3cc07d32c7611e8fb6b918a51d1527d562bd91a942b2779a3a04f53",
+  "originHash" : "68cfa8c3fc843d5206e43b8fa52ce9a5a7df178634a6a957b51353ace3f4383e",
   "pins" : [
     {
       "identity" : "gzipswift",
@@ -8,6 +8,14 @@
       "state" : {
         "revision" : "731037f6cc2be2ec01562f6597c1d0aa3fe6fd05",
         "version" : "6.0.1"
+      }
+    },
+    {
+      "identity" : "livekit-wakeword",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/livekit/livekit-wakeword",
+      "state" : {
+        "revision" : "60b5d755ee0835bd184cbb1f05063944a9bed121"
       }
     },
     {
@@ -26,6 +34,15 @@
       "state" : {
         "revision" : "8775112da257e8b0a5bf45e3f84fb80222592c89",
         "version" : "2.25.9"
+      }
+    },
+    {
+      "identity" : "onnxruntime-swift-package-manager",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/microsoft/onnxruntime-swift-package-manager",
+      "state" : {
+        "revision" : "b7fb7f7dea8a2469e6335d95a61b8f36d0dc83b2",
+        "version" : "1.24.2"
       }
     },
     {

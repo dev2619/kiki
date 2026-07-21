@@ -18,6 +18,12 @@ let package = Package(
         .package(url: "https://github.com/argmaxinc/WhisperKit.git", .upToNextMinor(from: "1.0.0")),
         .package(url: "https://github.com/ml-explore/mlx-swift-examples", .upToNextMinor(from: "2.25.9")),
         .package(url: "https://github.com/ml-explore/mlx-swift", .upToNextMinor(from: "0.25.6")),
+        // Motor wake-word abierto (Apache 2.0) para detección instantánea de la
+        // frase/comandos sin transcribir. macOS 14+, trae ONNX Runtime oficial.
+        // Pin por REVISIÓN: el `Package.swift` forwarder en la raíz del repo
+        // (que SPM necesita) solo existe en `main`, no en los tags v0.2.x — así
+        // que se fija el commit exacto de main en vez de un tag.
+        .package(url: "https://github.com/livekit/livekit-wakeword", revision: "60b5d755ee0835bd184cbb1f05063944a9bed121"),
     ],
     targets: [
         .target(name: "KikiCore"),
@@ -25,7 +31,13 @@ let package = Package(
         .target(name: "KikiAudio", dependencies: ["KikiCore"]),
         .target(name: "KikiInsert", dependencies: ["KikiCore"]),
         .target(name: "KikiStore", dependencies: ["KikiCore"]),
-        .target(name: "KikiWake", dependencies: ["KikiCore", "KikiAudio"]),
+        .target(
+            name: "KikiWake",
+            dependencies: [
+                "KikiCore", "KikiAudio",
+                .product(name: "LiveKitWakeWord", package: "livekit-wakeword"),
+            ]
+        ),
         .target(
             name: "KikiRefine",
             dependencies: [
