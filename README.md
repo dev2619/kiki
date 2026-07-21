@@ -21,7 +21,7 @@
 
 ## ⬇️ Descargar
 
-**[kiki 0.9.1 — descargar el `.dmg`](https://github.com/dev2619/kiki/releases/download/v0.9.1/kiki-0.9.1.dmg)** · [ver el release](https://github.com/dev2619/kiki/releases/tag/v0.9.1)
+**[kiki 1.1.0 — descargar el `.dmg`](https://github.com/dev2619/kiki/releases/download/v1.1.0/kiki-1.1.0.dmg)** · [ver el release](https://github.com/dev2619/kiki/releases/tag/v1.1.0)
 
 > El enlace [releases/latest](https://github.com/dev2619/kiki/releases/latest) siempre apunta a la versión más reciente.
 
